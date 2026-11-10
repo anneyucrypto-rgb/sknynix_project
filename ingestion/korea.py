@@ -1,0 +1,1 @@
+"""Korean market-data ingestion."""

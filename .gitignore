@@ -4,3 +4,5 @@ __pycache__/
 *.py[cod]
 ingestion/.env
 ingestion/*.part
+data/*.duckdb
+data/*.duckdb.wal

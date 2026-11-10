@@ -1,4 +1,4 @@
-"""Small Massive REST client for aggregate bars and historical stock quotes."""
+"""Project-specific Massive REST client for bars and historical quotes."""
 
 from __future__ import annotations
 
@@ -25,6 +25,15 @@ AGGREGATE_COLUMNS = [
     "volume",
     "vwap",
     "transactions",
+]
+PRICE_COLUMNS = [
+    "ticker",
+    "timestamp",
+    "open",
+    "high",
+    "low",
+    "close",
+    "vwap",
 ]
 QUOTE_COLUMNS = [
     "ticker",
@@ -135,8 +144,10 @@ class MassiveClient:
         multiplier: int = 5,
         timespan: str = "minute",
         adjusted: bool = True,
+        include_volume: bool = True,
     ) -> pd.DataFrame:
-        """Download custom OHLCV bars and return a normalized DataFrame."""
+        """Download normalized bars, optionally excluding volume-related fields."""
+        output_columns = AGGREGATE_COLUMNS if include_volume else PRICE_COLUMNS
         path = (
             f"/v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/"
             f"{start_date}/{end_date}"
@@ -153,7 +164,7 @@ class MassiveClient:
             records.extend(page)
 
         if not records:
-            return pd.DataFrame(columns=AGGREGATE_COLUMNS)
+            return pd.DataFrame(columns=output_columns)
 
         frame = pd.DataFrame.from_records(records).rename(
             columns={
@@ -172,7 +183,7 @@ class MassiveClient:
         for column in AGGREGATE_COLUMNS:
             if column not in frame:
                 frame[column] = pd.NA
-        return frame[AGGREGATE_COLUMNS].sort_values("timestamp").reset_index(drop=True)
+        return frame[output_columns].sort_values("timestamp").reset_index(drop=True)
 
     def download_quotes_parquet(
         self,

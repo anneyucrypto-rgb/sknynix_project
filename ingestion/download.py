@@ -1,4 +1,4 @@
-"""Download the three-month SK hynix arbitrage research dataset."""
+"""Download the most recent month of five-minute SK hynix research data."""
 
 from __future__ import annotations
 
@@ -9,20 +9,22 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
-PROJECT_DIR = Path(__file__).resolve().parents[1]
-LOCAL_PACKAGES = PROJECT_DIR / ".python_packages"
-if LOCAL_PACKAGES.is_dir():
-    sys.path.insert(0, str(LOCAL_PACKAGES))
-
 import pandas as pd
 
-from massive import MassiveAPIError, MassiveClient, write_parquet
+from massive_client import MassiveAPIError, MassiveClient, write_parquet
 
 
+PROJECT_DIR = Path(__file__).resolve().parents[1]
 INGESTION_DIR = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_DIR / "data"
 SECRET_FILE = INGESTION_DIR / ".env"
-US_TICKERS = ("SKHY", "SPY", "SOXX", "QQQ")
+DATASETS = (
+    ("SKHY", DATA_DIR / "us" / "SKHY_5min.parquet", True),
+    ("SPY", DATA_DIR / "us" / "SPY_5min.parquet", False),
+    ("SOXX", DATA_DIR / "us" / "SOXX_5min.parquet", False),
+    ("QQQ", DATA_DIR / "us" / "QQQ_5min.parquet", False),
+    ("C:USDKRW", DATA_DIR / "fx" / "USDKRW_5min.parquet", False),
+)
 
 
 def subtract_months(value: date, months: int) -> date:
@@ -52,8 +54,8 @@ def load_secret(path: Path = SECRET_FILE) -> str:
     )
 
 
-def download_korea_daily(start: date, end: date, destination: Path) -> int:
-    """Download daily 000660.KS bars from Yahoo Finance through yfinance."""
+def download_korean_daily(start: date, end: date, destination: Path) -> int:
+    """Download unadjusted daily SK hynix (000660.KS) prices from Yahoo Finance."""
     import yfinance as yf
 
     raw = yf.download(
@@ -67,9 +69,10 @@ def download_korea_daily(start: date, end: date, destination: Path) -> int:
         threads=False,
     )
     if raw.empty:
-        raise RuntimeError("The Korean-market provider returned no 000660.KS rows")
+        raise RuntimeError("the Korean-market provider returned no rows")
     if isinstance(raw.columns, pd.MultiIndex):
         raw.columns = raw.columns.get_level_values(0)
+
     frame = raw.reset_index().rename(
         columns={
             "Date": "date",
@@ -81,9 +84,19 @@ def download_korea_daily(start: date, end: date, destination: Path) -> int:
             "Volume": "volume",
         }
     )
-    frame.insert(0, "ticker", "000660.KS")
     frame.columns = [str(column).lower().replace(" ", "_") for column in frame.columns]
-    write_parquet(frame, destination)
+    frame.insert(0, "ticker", "000660.KS")
+    output_columns = [
+        "ticker",
+        "date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "adjusted_close",
+        "volume",
+    ]
+    write_parquet(frame[output_columns], destination)
     return len(frame)
 
 
@@ -98,7 +111,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--start-date",
         type=date.fromisoformat,
-        help="Inclusive start date; defaults to three calendar months before end-date.",
+        help="Inclusive start date; defaults to one calendar month before end-date.",
     )
     parser.add_argument(
         "--skip-quotes",
@@ -110,7 +123,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    start = args.start_date or subtract_months(args.end_date, 3)
+    start = args.start_date or subtract_months(args.end_date, 1)
     end = args.end_date
     if start > end:
         raise SystemExit("start-date must not be later than end-date")
@@ -119,40 +132,33 @@ def main() -> int:
     client = MassiveClient(load_secret())
     failures: list[str] = []
 
-    for ticker in US_TICKERS:
-        target = DATA_DIR / "us" / f"{ticker}_5min.parquet"
+    for ticker, target, include_volume in DATASETS:
+        label = ticker.removeprefix("C:")
         try:
             frame = client.get_aggregates(
-                ticker, start.isoformat(), end.isoformat(), multiplier=5, timespan="minute"
+                ticker,
+                start.isoformat(),
+                end.isoformat(),
+                multiplier=5,
+                timespan="minute",
+                include_volume=include_volume,
             )
             if frame.empty:
                 raise RuntimeError("no aggregate rows returned")
             write_parquet(frame, target)
-            print(f"OK  {ticker:7} {len(frame):>10,} rows -> {target}")
+            content = "price+volume" if include_volume else "price"
+            print(f"OK  {label:7} {len(frame):>10,} rows ({content}) -> {target}")
         except Exception as exc:
-            failures.append(f"{ticker}: {exc}")
-            print(f"ERR {ticker:7} {exc}", file=sys.stderr)
-
-    fx_target = DATA_DIR / "fx" / "USDKRW_5min.parquet"
-    try:
-        frame = client.get_aggregates(
-            "C:USDKRW", start.isoformat(), end.isoformat(), multiplier=5, timespan="minute"
-        )
-        if frame.empty:
-            raise RuntimeError("no aggregate rows returned")
-        write_parquet(frame, fx_target)
-        print(f"OK  USDKRW  {len(frame):>10,} rows -> {fx_target}")
-    except Exception as exc:
-        failures.append(f"USDKRW: {exc}")
-        print(f"ERR USDKRW  {exc}", file=sys.stderr)
+            failures.append(f"{label}: {exc}")
+            print(f"ERR {label:7} {exc}", file=sys.stderr)
 
     korea_target = DATA_DIR / "korea" / "000660_daily.parquet"
     try:
-        count = download_korea_daily(start, end, korea_target)
-        print(f"OK  000660   {count:>10,} rows -> {korea_target}")
+        count = download_korean_daily(start, end, korea_target)
+        print(f"OK  000660  {count:>10,} rows (daily price+volume) -> {korea_target}")
     except Exception as exc:
         failures.append(f"000660: {exc}")
-        print(f"ERR 000660   {exc}", file=sys.stderr)
+        print(f"ERR 000660  {exc}", file=sys.stderr)
 
     if not args.skip_quotes:
         quotes_target = DATA_DIR / "quotes" / "SKHY_quotes.parquet"

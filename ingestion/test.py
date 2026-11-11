@@ -1,33 +1,33 @@
-from download import load_secret
-from massive import RESTClient
+"""Small smoke test for processed Parquet outputs."""
 
-#############################################################
-#client = RESTClient(api_key=load_secret(), pagination=False)
+from pathlib import Path
 
-#quotes = []
-#for t in client.list_quotes(
-#	ticker="SKHY",
-#	order="asc",
-#	limit=10,
-#	sort="timestamp",
-#	):
-#    quotes.append(t)
+import pandas as pd
 
-#print(quotes)
-#############################################################
 
-import duckdb
+PROJECT = Path(__file__).resolve().parents[1]
+HORIZONS = (5, 10, 30, 60, 90, 120)
 
-connection = duckdb.connect(
-    "../data/skhynix.duckdb",
-    read_only=True,
-)
 
-events = connection.execute("""
-    SELECT *
-    FROM event_korea_asof
-    WHERE anchor_type = 'premarket_0400'
-    ORDER BY event_date_ny
-""").df()
+def main() -> None:
+    granger = pd.read_parquet(PROJECT / "data/processed/granger_panel.parquet")
+    arbitrage = pd.read_parquet(
+        PROJECT / "data/processed/arbitrage_panel_1min.parquet"
+    )
+    required = {
+        *(f"skhy_fwd_return_{horizon}m" for horizon in HORIZONS),
+        "t_first_trade",
+        "t_first_quote",
+        "t_first_minute_bar",
+    }
+    missing = required.difference(granger.columns)
+    if missing:
+        raise AssertionError(f"granger panel is missing columns: {sorted(missing)}")
+    if "arbitrage_premium_log" not in arbitrage:
+        raise AssertionError("arbitrage panel is missing arbitrage_premium_log")
+    print(f"granger rows: {len(granger):,}")
+    print(f"arbitrage rows: {len(arbitrage):,}")
 
-print(events.head())
+
+if __name__ == "__main__":
+    main()

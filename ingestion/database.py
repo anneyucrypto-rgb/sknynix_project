@@ -1,0 +1,618 @@
+"""Transform raw Parquet data into Granger/VARX and arbitrage feature panels."""
+
+from __future__ import annotations
+
+import argparse
+from datetime import date, datetime, time
+from pathlib import Path
+from typing import Any, Final
+from zoneinfo import ZoneInfo
+
+import numpy as np
+import pandas as pd
+
+
+PROJECT_DIR: Final = Path(__file__).resolve().parents[1]
+DEFAULT_RAW_DIR: Final = PROJECT_DIR / "data" / "raw"
+DEFAULT_PROCESSED_DIR: Final = PROJECT_DIR / "data" / "processed"
+DEFAULT_ADS_SHARES_PER_ADS: Final = 0.1
+NY_TZ: Final = ZoneInfo("America/New_York")
+SEOUL_TZ: Final = ZoneInfo("Asia/Seoul")
+UTC_TZ: Final = ZoneInfo("UTC")
+HORIZONS: Final = (5, 10, 30, 60, 90, 120)
+EVENT_ANCHORS: Final = (
+    ("premarket_0400", time(4, 0)),
+    ("regular_0930", time(9, 30)),
+)
+
+RAW_FILES: Final = {
+    "skhy": Path("us/SKHY_1min.parquet"),
+    "spy": Path("us/SPY_1min.parquet"),
+    "soxx": Path("us/SOXX_1min.parquet"),
+    "qqq": Path("us/QQQ_1min.parquet"),
+    "usdkrw": Path("fx/USDKRW_1min.parquet"),
+    "korea": Path("korea/000660_daily.parquet"),
+}
+
+
+def _safe_log_ratio(numerator: Any, denominator: Any) -> float:
+    if pd.isna(numerator) or pd.isna(denominator):
+        return np.nan
+    numerator = float(numerator)
+    denominator = float(denominator)
+    if numerator <= 0 or denominator <= 0:
+        return np.nan
+    return float(np.log(numerator / denominator))
+
+
+def _required_paths(raw_dir: Path) -> dict[str, Path]:
+    paths = {name: raw_dir / relative for name, relative in RAW_FILES.items()}
+    missing = [str(path) for path in paths.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "Required raw files are missing:\n- " + "\n- ".join(missing)
+        )
+    return paths
+
+
+def _load_bars(path: Path) -> pd.DataFrame:
+    frame = pd.read_parquet(path).copy()
+    timestamp_column = "timestamp_utc" if "timestamp_utc" in frame else "timestamp"
+    frame["timestamp_utc"] = pd.to_datetime(frame[timestamp_column], utc=True)
+    if timestamp_column != "timestamp_utc":
+        frame = frame.drop(columns=[timestamp_column])
+    frame["timestamp_ny"] = frame["timestamp_utc"].dt.tz_convert(NY_TZ)
+    frame["event_date_ny"] = frame["timestamp_ny"].dt.date
+    frame["event_time_ny"] = frame["timestamp_ny"].dt.time
+    return frame.sort_values("timestamp_utc").drop_duplicates("timestamp_utc", keep="last")
+
+
+def _load_korea(path: Path) -> pd.DataFrame:
+    frame = pd.read_parquet(path).copy()
+    frame["trading_date"] = pd.to_datetime(frame["date"]).dt.date
+    local_close = pd.to_datetime(frame["trading_date"].astype(str) + " 15:30:00")
+    frame["availability_timestamp_utc"] = (
+        local_close.dt.tz_localize(SEOUL_TZ).dt.tz_convert(UTC_TZ)
+    )
+    frame = frame.sort_values("availability_timestamp_utc").reset_index(drop=True)
+    frame["prior_adjusted_close"] = frame["adjusted_close"].shift(1)
+    frame["kr_return_0"] = np.log(frame["adjusted_close"] / frame["prior_adjusted_close"])
+    frame["kr_return_lag1"] = frame["kr_return_0"].shift(1)
+    frame["kr_return_lag2"] = frame["kr_return_0"].shift(2)
+    frame["korea_range"] = np.log(frame["high"] / frame["low"])
+    frame["korea_log_volume"] = np.log1p(frame["volume"])
+    return frame
+
+
+def _load_optional_events(path: Path, timestamp_column: str) -> pd.DataFrame:
+    if not path.is_file() or path.stat().st_size == 0:
+        return pd.DataFrame()
+    frame = pd.read_parquet(path).copy()
+    if frame.empty:
+        return frame
+    frame["event_date_ny"] = pd.to_datetime(frame["event_date_ny"]).dt.date
+    frame["scheduled_timestamp_utc"] = pd.to_datetime(
+        frame["scheduled_timestamp_utc"], utc=True
+    )
+    frame[timestamp_column] = pd.to_datetime(frame[timestamp_column], utc=True)
+    return frame
+
+
+def _date_groups(frame: pd.DataFrame) -> dict[date, pd.DataFrame]:
+    return {
+        event_date: group.sort_values("timestamp_utc").reset_index(drop=True)
+        for event_date, group in frame.groupby("event_date_ny", sort=True)
+    }
+
+
+def _first_bar(group: pd.DataFrame | None, timestamp_utc: pd.Timestamp) -> pd.Series | None:
+    if group is None or group.empty:
+        return None
+    candidates = group[group["timestamp_utc"] >= timestamp_utc]
+    if candidates.empty:
+        return None
+    return candidates.iloc[0]
+
+
+def _exact_bar(group: pd.DataFrame | None, timestamp_utc: pd.Timestamp) -> pd.Series | None:
+    if group is None or group.empty:
+        return None
+    matches = group[group["timestamp_utc"] == timestamp_utc]
+    return None if matches.empty else matches.iloc[-1]
+
+
+def _latest_at_or_before(
+    frame: pd.DataFrame, timestamp_utc: pd.Timestamp
+) -> pd.Series | None:
+    candidates = frame[frame["timestamp_utc"] <= timestamp_utc]
+    return None if candidates.empty else candidates.iloc[-1]
+
+
+def _previous_regular_close(
+    groups: dict[date, pd.DataFrame], event_date: date
+) -> pd.Series | None:
+    previous_dates = [candidate for candidate in groups if candidate < event_date]
+    if not previous_dates:
+        return None
+    group = groups[max(previous_dates)]
+    regular = group[
+        (group["event_time_ny"] >= time(9, 30))
+        & (group["event_time_ny"] <= time(15, 59, 59))
+    ]
+    return None if regular.empty else regular.iloc[-1]
+
+
+def _pre_event_features(
+    group: pd.DataFrame | None,
+    anchor_timestamp: pd.Timestamp,
+    anchor_bar: pd.Series | None,
+    previous_close: pd.Series | None,
+    anchor_type: str,
+) -> dict[str, Any]:
+    if anchor_bar is None:
+        return {
+            "return": np.nan,
+            "rv_30m": np.nan,
+            "log_volume_30m": np.nan,
+            "vwap_deviation": np.nan,
+            "window_available": False,
+        }
+
+    if group is None:
+        group = pd.DataFrame()
+    window = group[
+        (group["timestamp_utc"] >= anchor_timestamp - pd.Timedelta(minutes=30))
+        & (group["timestamp_utc"] < anchor_timestamp)
+    ].sort_values("timestamp_utc")
+
+    if anchor_type == "regular_0930" and not window.empty:
+        pre_return = _safe_log_ratio(anchor_bar.get("open"), window.iloc[0].get("open"))
+    elif anchor_type == "premarket_0400" and previous_close is not None:
+        pre_return = _safe_log_ratio(anchor_bar.get("open"), previous_close.get("close"))
+    else:
+        pre_return = np.nan
+
+    returns = np.log(window["close"]).diff() if not window.empty else pd.Series(dtype=float)
+    realized_volatility = (
+        float(np.sqrt(np.nansum(np.square(returns)))) if len(window) == 30 else np.nan
+    )
+    log_volume = (
+        float(np.log1p(window["volume"].sum()))
+        if len(window) == 30 and "volume" in window
+        else np.nan
+    )
+    reference = window.iloc[-1] if not window.empty else previous_close
+    vwap_deviation = (
+        _safe_log_ratio(reference.get("close"), reference.get("vwap"))
+        if reference is not None
+        else np.nan
+    )
+    return {
+        "return": pre_return,
+        "rv_30m": realized_volatility,
+        "log_volume_30m": log_volume,
+        "vwap_deviation": vwap_deviation,
+        "window_available": len(window) == 30,
+    }
+
+
+def _future_return(
+    group: pd.DataFrame | None,
+    anchor_bar: pd.Series | None,
+    horizon_minutes: int,
+) -> tuple[float, pd.Timestamp | pd.NaT, float]:
+    """Return log(P[t0+h] / P[t0]), target timestamp, and P[t0+h].
+
+    P[t0] is the opening price of the first qualifying one-minute bar at or
+    after the scheduled event anchor. P[t0+h] is the close of the one-minute
+    bar ending exactly h minutes after that actual anchor.
+    """
+    if anchor_bar is None:
+        return np.nan, pd.NaT, np.nan
+    target_start = anchor_bar["timestamp_utc"] + pd.Timedelta(
+        minutes=horizon_minutes - 1
+    )
+    target = _exact_bar(group, target_start)
+    if target is None:
+        return np.nan, pd.NaT, np.nan
+    target_price = target.get("close")
+    return (
+        _safe_log_ratio(target_price, anchor_bar.get("open")),
+        target["timestamp_utc"] + pd.Timedelta(minutes=1),
+        float(target_price) if pd.notna(target_price) else np.nan,
+    )
+
+
+def _event_lookup(frame: pd.DataFrame) -> dict[tuple[date, str], pd.Series]:
+    if frame.empty:
+        return {}
+    return {
+        (row["event_date_ny"], row["anchor_type"]): row
+        for _, row in frame.iterrows()
+    }
+
+
+def build_granger_panel(
+    bars: dict[str, pd.DataFrame],
+    korea: pd.DataFrame,
+    trades: pd.DataFrame,
+    quotes: pd.DataFrame,
+) -> pd.DataFrame:
+    """Create one wide feature row per U.S. event date and anchor."""
+    groups = {name: _date_groups(frame) for name, frame in bars.items() if name != "usdkrw"}
+    skhy_groups = groups["skhy"]
+    trade_lookup = _event_lookup(trades)
+    quote_lookup = _event_lookup(quotes)
+    rows: list[dict[str, Any]] = []
+
+    for event_date in sorted(skhy_groups):
+        for anchor_type, anchor_time in EVENT_ANCHORS:
+            scheduled_local = datetime.combine(event_date, anchor_time, NY_TZ)
+            scheduled_utc = pd.Timestamp(scheduled_local.astimezone(UTC_TZ))
+            key = (event_date, anchor_type)
+
+            anchor_bars = {
+                name: _first_bar(groups[name].get(event_date), scheduled_utc)
+                for name in ("skhy", "spy", "soxx", "qqq")
+            }
+            skhy_anchor = anchor_bars["skhy"]
+            if skhy_anchor is None:
+                continue
+
+            previous_closes = {
+                name: _previous_regular_close(groups[name], event_date)
+                for name in ("skhy", "spy", "soxx", "qqq")
+            }
+            korea_candidates = korea[
+                korea["availability_timestamp_utc"] <= scheduled_utc
+            ]
+            korea_row = None if korea_candidates.empty else korea_candidates.iloc[-1]
+            trade_row = trade_lookup.get(key)
+            quote_row = quote_lookup.get(key)
+
+            row: dict[str, Any] = {
+                "event_date_ny": event_date,
+                "anchor_type": anchor_type,
+                "timestamp_utc": scheduled_utc,
+                "t_first_minute_bar": skhy_anchor["timestamp_utc"],
+                "t_first_trade": trade_row.get("t_first_trade") if trade_row is not None else pd.NaT,
+                "t_first_quote": quote_row.get("t_first_quote") if quote_row is not None else pd.NaT,
+                "first_trade_price": trade_row.get("trade_price") if trade_row is not None else np.nan,
+                "first_trade_size": trade_row.get("trade_size") if trade_row is not None else np.nan,
+                "first_bid_price": quote_row.get("bid_price") if quote_row is not None else np.nan,
+                "first_ask_price": quote_row.get("ask_price") if quote_row is not None else np.nan,
+                "first_bid_size": quote_row.get("bid_size") if quote_row is not None else np.nan,
+                "first_ask_size": quote_row.get("ask_size") if quote_row is not None else np.nan,
+                "skhy_anchor_price": skhy_anchor.get("open"),
+                "skhy_anchor_open": skhy_anchor.get("open"),
+                "skhy_anchor_close": skhy_anchor.get("close"),
+                "skhy_anchor_volume": skhy_anchor.get("volume"),
+                "previous_us_regular_close": (
+                    previous_closes["skhy"].get("close")
+                    if previous_closes["skhy"] is not None
+                    else np.nan
+                ),
+                "exact_minute_anchor": skhy_anchor["timestamp_utc"] == scheduled_utc,
+                "iso_day_of_week": event_date.isoweekday(),
+            }
+
+            if korea_row is not None:
+                row.update(
+                    {
+                        "korea_trading_date": korea_row["trading_date"],
+                        "korea_availability_timestamp_utc": korea_row[
+                            "availability_timestamp_utc"
+                        ],
+                        "korea_open": korea_row["open"],
+                        "korea_high": korea_row["high"],
+                        "korea_low": korea_row["low"],
+                        "korea_close": korea_row["close"],
+                        "korea_adjusted_close": korea_row["adjusted_close"],
+                        "korea_prior_adjusted_close": korea_row[
+                            "prior_adjusted_close"
+                        ],
+                        "korea_volume": korea_row["volume"],
+                        "kr_return_0": korea_row["kr_return_0"],
+                        "kr_return_lag1": korea_row["kr_return_lag1"],
+                        "kr_return_lag2": korea_row["kr_return_lag2"],
+                        "korea_range": korea_row["korea_range"],
+                        "korea_log_volume": korea_row["korea_log_volume"],
+                        "korea_stale_days": (event_date - korea_row["trading_date"]).days,
+                        "korea_new_close": event_date == korea_row["trading_date"],
+                    }
+                )
+
+            skhy_pre = _pre_event_features(
+                skhy_groups.get(event_date),
+                scheduled_utc,
+                skhy_anchor,
+                previous_closes["skhy"],
+                anchor_type,
+            )
+            row.update(
+                {
+                    "skhy_pre_event_return": skhy_pre["return"],
+                    "skhy_pre_event_rv_30m": skhy_pre["rv_30m"],
+                    "skhy_pre_event_log_volume_30m": skhy_pre["log_volume_30m"],
+                    "skhy_vwap_deviation": skhy_pre["vwap_deviation"],
+                    "pre_event_window_available": skhy_pre["window_available"],
+                    "overnight_gap": _safe_log_ratio(
+                        skhy_anchor.get("open"),
+                        previous_closes["skhy"].get("close")
+                        if previous_closes["skhy"] is not None
+                        else np.nan,
+                    ),
+                }
+            )
+
+            for name in ("spy", "soxx", "qqq"):
+                feature = _pre_event_features(
+                    groups[name].get(event_date),
+                    scheduled_utc,
+                    anchor_bars[name],
+                    previous_closes[name],
+                    anchor_type,
+                )
+                row[f"{name}_pre_event_return"] = feature["return"]
+
+            fx_now = _latest_at_or_before(bars["usdkrw"], scheduled_utc)
+            fx_pre = _latest_at_or_before(
+                bars["usdkrw"], scheduled_utc - pd.Timedelta(minutes=30)
+            )
+            row["usdkrw_return_latest"] = _safe_log_ratio(
+                fx_now.get("close") if fx_now is not None else np.nan,
+                fx_pre.get("close") if fx_pre is not None else np.nan,
+            )
+
+            for horizon in HORIZONS:
+                for name in ("skhy", "spy", "soxx", "qqq"):
+                    value, target_time, target_price = _future_return(
+                        groups[name].get(event_date), anchor_bars[name], horizon
+                    )
+                    row[f"{name}_fwd_return_{horizon}m"] = value
+                    if name == "skhy":
+                        row[f"skhy_target_price_{horizon}m"] = target_price
+                        row[f"skhy_target_timestamp_{horizon}m"] = target_time
+                        row[f"skhy_fwd_return_{horizon}m_missing"] = pd.isna(value)
+                        total_response = _safe_log_ratio(
+                            target_price, row["previous_us_regular_close"]
+                        )
+                        row[f"skhy_total_response_{horizon}m"] = total_response
+                        row[f"skhy_total_response_{horizon}m_missing"] = pd.isna(
+                            total_response
+                        )
+                fx_target = _latest_at_or_before(
+                    bars["usdkrw"],
+                    scheduled_utc + pd.Timedelta(minutes=horizon),
+                )
+                row[f"usdkrw_fwd_return_{horizon}m"] = _safe_log_ratio(
+                    fx_target.get("close") if fx_target is not None else np.nan,
+                    fx_now.get("close") if fx_now is not None else np.nan,
+                )
+
+            forward_missing = [
+                row[f"skhy_fwd_return_{horizon}m_missing"]
+                for horizon in HORIZONS
+            ]
+            total_missing = [
+                row[f"skhy_total_response_{horizon}m_missing"]
+                for horizon in HORIZONS
+            ]
+            row["missing_target_count"] = int(sum(forward_missing))
+            row["all_targets_complete"] = not any(forward_missing)
+            row["missing_total_response_count"] = int(sum(total_missing))
+            row["all_total_responses_complete"] = not any(total_missing)
+
+            rows.append(row)
+
+    panel = pd.DataFrame.from_records(rows).sort_values(
+        ["anchor_type", "event_date_ny"]
+    )
+    panel["skhy_pre_event_volume_z"] = panel.groupby("anchor_type")[
+        "skhy_pre_event_log_volume_30m"
+    ].transform(lambda series: (series - series.mean()) / series.std(ddof=1))
+
+    lag_targets = [
+        *(f"skhy_fwd_return_{horizon}m" for horizon in HORIZONS),
+        *(f"skhy_total_response_{horizon}m" for horizon in HORIZONS),
+    ]
+    for column in lag_targets:
+        panel[f"{column}_lag1"] = panel.groupby("anchor_type")[column].shift(1)
+        panel[f"{column}_lag2"] = panel.groupby("anchor_type")[column].shift(2)
+
+    kr_expected = np.log(
+        panel["korea_adjusted_close"] / panel["korea_prior_adjusted_close"]
+    )
+    kr_complete = panel["kr_return_0"].notna() & kr_expected.notna()
+    if not np.allclose(
+        panel.loc[kr_complete, "kr_return_0"],
+        kr_expected.loc[kr_complete],
+        rtol=1e-12,
+        atol=1e-12,
+    ):
+        raise AssertionError("Korean return identity failed")
+
+    for horizon in HORIZONS:
+        total = panel[f"skhy_total_response_{horizon}m"]
+        decomposed = panel["overnight_gap"] + panel[
+            f"skhy_fwd_return_{horizon}m"
+        ]
+        complete = total.notna() & decomposed.notna()
+        if not np.allclose(
+            total.loc[complete],
+            decomposed.loc[complete],
+            rtol=1e-12,
+            atol=1e-12,
+        ):
+            raise AssertionError(
+                f"Total-response decomposition failed at {horizon} minutes"
+            )
+
+    return panel.sort_values(["event_date_ny", "anchor_type"]).reset_index(drop=True)
+
+
+def build_arbitrage_panel(
+    bars: dict[str, pd.DataFrame],
+    korea: pd.DataFrame,
+    granger_panel: pd.DataFrame,
+    ads_shares_per_ads: float,
+) -> pd.DataFrame:
+    """Create a one-minute panel with FX parity, premium, and residual features."""
+    skhy = bars["skhy"].copy().sort_values("timestamp_utc")
+    fx = bars["usdkrw"][["timestamp_utc", "close"]].rename(
+        columns={"close": "usdkrw_close"}
+    )
+    korea_asof = korea[
+        [
+            "availability_timestamp_utc",
+            "trading_date",
+            "close",
+            "adjusted_close",
+            "kr_return_0",
+            "kr_return_lag1",
+            "korea_range",
+            "volume",
+        ]
+    ].rename(
+        columns={
+            "close": "korea_close",
+            "adjusted_close": "korea_adjusted_close",
+            "volume": "korea_volume",
+        }
+    )
+
+    panel = pd.merge_asof(
+        skhy,
+        korea_asof.sort_values("availability_timestamp_utc"),
+        left_on="timestamp_utc",
+        right_on="availability_timestamp_utc",
+        direction="backward",
+    )
+    panel = pd.merge_asof(
+        panel.sort_values("timestamp_utc"),
+        fx.sort_values("timestamp_utc"),
+        on="timestamp_utc",
+        direction="backward",
+        tolerance=pd.Timedelta(minutes=5),
+    )
+    panel["ads_shares_per_ads"] = ads_shares_per_ads
+    panel["korea_parity_usd_per_ads"] = (
+        panel["korea_adjusted_close"]
+        * ads_shares_per_ads
+        / panel["usdkrw_close"]
+    )
+    panel["arbitrage_premium_log"] = np.log(
+        panel["close"] / panel["korea_parity_usd_per_ads"]
+    )
+    panel["arbitrage_premium_pct"] = np.expm1(panel["arbitrage_premium_log"])
+    panel["skhy_return_1m"] = np.log(panel["close"]).diff()
+    panel["usdkrw_return_1m"] = np.log(panel["usdkrw_close"]).diff()
+
+    for window in (30, 60, 120, 390):
+        rolling = panel["arbitrage_premium_log"].rolling(
+            window, min_periods=max(10, window // 4)
+        )
+        mean = rolling.mean()
+        std = rolling.std(ddof=1)
+        panel[f"premium_residual_{window}m"] = panel["arbitrage_premium_log"] - mean
+        panel[f"premium_zscore_{window}m"] = (
+            panel["arbitrage_premium_log"] - mean
+        ) / std.replace(0, np.nan)
+
+    local_minutes = panel["timestamp_ny"].dt.hour * 60 + panel["timestamp_ny"].dt.minute
+    panel["minutes_from_0400"] = local_minutes - 4 * 60
+    panel["minutes_from_0930"] = local_minutes - (9 * 60 + 30)
+    panel["session"] = np.select(
+        [
+            (local_minutes >= 4 * 60) & (local_minutes < 9 * 60 + 30),
+            (local_minutes >= 9 * 60 + 30) & (local_minutes < 16 * 60),
+            (local_minutes >= 16 * 60) & (local_minutes <= 20 * 60),
+        ],
+        ["premarket", "regular", "afterhours"],
+        default="outside",
+    )
+    panel["is_0400_event"] = local_minutes == 4 * 60
+    panel["is_0930_event"] = local_minutes == 9 * 60 + 30
+
+    timestamp_columns = ["t_first_trade", "t_first_quote", "t_first_minute_bar"]
+    for anchor_type, prefix in (
+        ("premarket_0400", "premarket"),
+        ("regular_0930", "regular"),
+    ):
+        event_timestamps = granger_panel[
+            granger_panel["anchor_type"] == anchor_type
+        ][["event_date_ny", *timestamp_columns]].rename(
+            columns={column: f"{prefix}_{column}" for column in timestamp_columns}
+        )
+        panel = panel.merge(event_timestamps, on="event_date_ny", how="left")
+
+    return panel.sort_values("timestamp_utc").reset_index(drop=True)
+
+
+def build_processed_panels(
+    raw_dir: Path = DEFAULT_RAW_DIR,
+    processed_dir: Path = DEFAULT_PROCESSED_DIR,
+    ads_shares_per_ads: float = DEFAULT_ADS_SHARES_PER_ADS,
+) -> dict[str, int]:
+    """Read raw files and atomically write the two processed feature panels."""
+    if ads_shares_per_ads <= 0:
+        raise ValueError("ads_shares_per_ads must be positive")
+    raw_dir = raw_dir.resolve()
+    processed_dir = processed_dir.resolve()
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    paths = _required_paths(raw_dir)
+    bars = {name: _load_bars(path) for name, path in paths.items() if name != "korea"}
+    korea = _load_korea(paths["korea"])
+    trades = _load_optional_events(
+        raw_dir / "us" / "SKHY_first_trades.parquet", "t_first_trade"
+    )
+    quotes = _load_optional_events(
+        raw_dir / "us" / "SKHY_first_quotes.parquet", "t_first_quote"
+    )
+
+    granger_panel = build_granger_panel(bars, korea, trades, quotes)
+    arbitrage_panel = build_arbitrage_panel(
+        bars, korea, granger_panel, ads_shares_per_ads
+    )
+    granger_path = processed_dir / "granger_panel.parquet"
+    arbitrage_path = processed_dir / "arbitrage_panel_1min.parquet"
+    _atomic_parquet(granger_panel, granger_path)
+    _atomic_parquet(arbitrage_panel, arbitrage_path)
+    return {
+        str(granger_path): len(granger_panel),
+        str(arbitrage_path): len(arbitrage_panel),
+    }
+
+
+def _atomic_parquet(frame: pd.DataFrame, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".part")
+    frame.to_parquet(temporary, index=False, compression="zstd")
+    temporary.replace(destination)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW_DIR)
+    parser.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
+    parser.add_argument(
+        "--ads-shares-per-ads",
+        type=float,
+        default=DEFAULT_ADS_SHARES_PER_ADS,
+        help="Korean common shares represented by one SKHY ADS (default: 0.1).",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    counts = build_processed_panels(
+        args.raw_dir, args.processed_dir, args.ads_shares_per_ads
+    )
+    for path, count in counts.items():
+        print(f"{path}: {count:,} rows")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

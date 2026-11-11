@@ -135,6 +135,47 @@ class MassiveClient:
             url = payload.get("next_url")
             next_params = None
 
+    def get_first_trade(
+        self, ticker: str, start_timestamp_ns: int, end_timestamp_ns: int
+    ) -> dict[str, Any] | None:
+        """Return the earliest reported trade within a nanosecond UTC interval."""
+        params = {
+            "timestamp.gte": start_timestamp_ns,
+            "timestamp.lt": end_timestamp_ns,
+            "sort": "timestamp",
+            "order": "asc",
+            "limit": 50_000,
+        }
+        for page in self.iter_pages(f"/v3/trades/{ticker}", params):
+            if page:
+                return page[0]
+        return None
+
+    def get_first_valid_quote(
+        self, ticker: str, start_timestamp_ns: int, end_timestamp_ns: int
+    ) -> dict[str, Any] | None:
+        """Return the earliest two-sided, non-crossed NBBO quote in an interval."""
+        params = {
+            "timestamp.gte": start_timestamp_ns,
+            "timestamp.lt": end_timestamp_ns,
+            "sort": "timestamp",
+            "order": "asc",
+            "limit": 50_000,
+        }
+        for page in self.iter_pages(f"/v3/quotes/{ticker}", params):
+            for quote in page:
+                bid = quote.get("bid_price")
+                ask = quote.get("ask_price")
+                if (
+                    bid is not None
+                    and ask is not None
+                    and bid > 0
+                    and ask > 0
+                    and ask >= bid
+                ):
+                    return quote
+        return None
+
     def get_aggregates(
         self,
         ticker: str,

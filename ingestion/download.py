@@ -1,4 +1,4 @@
-"""Download raw one-minute and event-level SK hynix research data."""
+"""Download raw data for configured Korean/U.S. price-discovery pairs."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import calendar
 import json
 import os
 import sys
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Final
@@ -23,18 +24,45 @@ RAW_DIR: Final = PROJECT_DIR / "data" / "raw"
 SECRET_FILE: Final = INGESTION_DIR / ".env"
 NY_TZ: Final = ZoneInfo("America/New_York")
 UTC_TZ: Final = ZoneInfo("UTC")
+BAR_MINUTES: Final = 5
 
-BAR_DATASETS: Final = (
-    ("SKHY", RAW_DIR / "us" / "SKHY_1min.parquet", True),
-    ("SPY", RAW_DIR / "us" / "SPY_1min.parquet", True),
-    ("SOXX", RAW_DIR / "us" / "SOXX_1min.parquet", True),
-    ("QQQ", RAW_DIR / "us" / "QQQ_1min.parquet", True),
-    ("C:USDKRW", RAW_DIR / "fx" / "USDKRW_1min.parquet", True),
+CONTROL_BAR_DATASETS: Final = (
+    ("SPY", RAW_DIR / "us" / "SPY_5min.parquet", True),
+    ("SOXX", RAW_DIR / "us" / "SOXX_5min.parquet", True),
+    ("QQQ", RAW_DIR / "us" / "QQQ_5min.parquet", True),
+    ("C:USDKRW", RAW_DIR / "fx" / "USDKRW_5min.parquet", True),
 )
 EVENT_ANCHORS: Final = (
     ("premarket_0400", time(4, 0)),
     ("regular_0930", time(9, 30)),
 )
+
+
+@dataclass(frozen=True)
+class ResearchPair:
+    company: str
+    korea_ticker: str
+    us_ticker: str
+    us_exchange: str
+    industry: str
+
+    @property
+    def korea_file_stem(self) -> str:
+        return self.korea_ticker.split(".", 1)[0]
+
+
+RESEARCH_PAIRS: Final = (
+    ResearchPair("SK hynix", "000660.KS", "SKHY", "Nasdaq", "Semiconductors"),
+    ResearchPair("LG Display", "034220.KS", "LPL", "NYSE", "Displays"),
+    ResearchPair("SK Telecom", "017670.KS", "SKM", "NYSE", "Telecommunications"),
+    ResearchPair("KT Corporation", "030200.KS", "KT", "NYSE", "Telecommunications"),
+    ResearchPair("POSCO Holdings", "005490.KS", "PKX", "NYSE", "Steel, materials"),
+    ResearchPair("KB Financial", "105560.KS", "KB", "NYSE", "Banking"),
+    ResearchPair("Shinhan Financial", "055550.KS", "SHG", "NYSE", "Banking"),
+    ResearchPair("Woori Financial", "316140.KS", "WF", "NYSE", "Banking"),
+    ResearchPair("Korea Electric Power", "015760.KS", "KEP", "NYSE", "Utilities"),
+)
+PAIR_BY_US_TICKER: Final = {pair.us_ticker: pair for pair in RESEARCH_PAIRS}
 
 
 def subtract_months(value: date, months: int) -> date:
@@ -62,12 +90,14 @@ def load_secret(path: Path = SECRET_FILE) -> str:
     raise RuntimeError(f"MASSIVE_API_KEY is missing from the environment and {path}")
 
 
-def download_korean_daily(start: date, end: date, destination: Path) -> int:
-    """Download raw daily 000660.KS OHLCV observations."""
+def download_korean_daily(
+    ticker: str, start: date, end: date, destination: Path
+) -> int:
+    """Download raw daily Korean OHLCV observations."""
     import yfinance as yf
 
     raw = yf.download(
-        "000660.KS",
+        ticker,
         start=start.isoformat(),
         end=(end + timedelta(days=1)).isoformat(),
         interval="1d",
@@ -93,7 +123,7 @@ def download_korean_daily(start: date, end: date, destination: Path) -> int:
         }
     )
     frame.columns = [str(column).lower().replace(" ", "_") for column in frame.columns]
-    frame.insert(0, "ticker", "000660.KS")
+    frame.insert(0, "ticker", ticker)
     write_parquet(
         frame[
             [
@@ -112,8 +142,8 @@ def download_korean_daily(start: date, end: date, destination: Path) -> int:
     return len(frame)
 
 
-def _event_schedule(skhy_bars: pd.DataFrame) -> list[dict[str, Any]]:
-    timestamps = pd.to_datetime(skhy_bars["timestamp"], utc=True)
+def _event_schedule(us_bars: pd.DataFrame) -> list[dict[str, Any]]:
+    timestamps = pd.to_datetime(us_bars["timestamp"], utc=True)
     trading_dates = sorted(set(timestamps.dt.tz_convert(NY_TZ).dt.date))
     schedule: list[dict[str, Any]] = []
     for trading_date in trading_dates:
@@ -140,8 +170,11 @@ def _is_entitlement_error(exc: Exception) -> bool:
     return "403" in message or "not entitled" in message or "upgrade your plan" in message
 
 
-def _trade_row(event: dict[str, Any], trade: dict[str, Any]) -> dict[str, Any]:
+def _trade_row(
+    ticker: str, event: dict[str, Any], trade: dict[str, Any]
+) -> dict[str, Any]:
     return {
+        "ticker": ticker,
         "event_date_ny": event["event_date_ny"],
         "anchor_type": event["anchor_type"],
         "scheduled_timestamp_utc": event["scheduled_timestamp_utc"],
@@ -156,8 +189,11 @@ def _trade_row(event: dict[str, Any], trade: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _quote_row(event: dict[str, Any], quote: dict[str, Any]) -> dict[str, Any]:
+def _quote_row(
+    ticker: str, event: dict[str, Any], quote: dict[str, Any]
+) -> dict[str, Any]:
     return {
+        "ticker": ticker,
         "event_date_ny": event["event_date_ny"],
         "anchor_type": event["anchor_type"],
         "scheduled_timestamp_utc": event["scheduled_timestamp_utc"],
@@ -177,6 +213,7 @@ def _quote_row(event: dict[str, Any], quote: dict[str, Any]) -> dict[str, Any]:
 
 def _empty_event_frame(kind: str) -> pd.DataFrame:
     common: dict[str, pd.Series] = {
+        "ticker": pd.Series(dtype="string"),
         "event_date_ny": pd.Series(dtype="datetime64[ns]"),
         "anchor_type": pd.Series(dtype="string"),
         "scheduled_timestamp_utc": pd.Series(dtype="datetime64[ns, UTC]"),
@@ -217,6 +254,7 @@ def _download_first_events(
     client: MassiveClient,
     schedule: list[dict[str, Any]],
     *,
+    ticker: str,
     kind: str,
     destination: Path,
 ) -> tuple[int, str | None]:
@@ -226,20 +264,22 @@ def _download_first_events(
         end_ns = int(event["interval_end_utc"].value)
         try:
             if kind == "trade":
-                record = client.get_first_trade("SKHY", start_ns, end_ns)
+                record = client.get_first_trade(ticker, start_ns, end_ns)
                 if record is not None:
-                    rows.append(_trade_row(event, record))
+                    rows.append(_trade_row(ticker, event, record))
             else:
-                record = client.get_first_valid_quote("SKHY", start_ns, end_ns)
+                record = client.get_first_valid_quote(ticker, start_ns, end_ns)
                 if record is not None:
-                    rows.append(_quote_row(event, record))
+                    rows.append(_quote_row(ticker, event, record))
         except MassiveAPIError as exc:
             if _is_entitlement_error(exc):
                 write_parquet(_empty_event_frame(kind), destination)
                 return 0, str(exc)
             raise
         if index % 25 == 0:
-            print(f"    {kind}: checked {index:,}/{len(schedule):,} events")
+            print(
+                f"    {ticker} {kind}: checked {index:,}/{len(schedule):,} events"
+            )
 
     frame = pd.DataFrame.from_records(rows) if rows else _empty_event_frame(kind)
     if not frame.empty:
@@ -263,8 +303,33 @@ def parse_args() -> argparse.Namespace:
         type=date.fromisoformat,
         help="Inclusive start date; defaults to one calendar month before end-date.",
     )
+    parser.add_argument(
+        "--pairs",
+        nargs="+",
+        type=str.upper,
+        choices=[*PAIR_BY_US_TICKER, "ALL"],
+        default=["SKHY"],
+        metavar="US_TICKER",
+        help=(
+            "U.S. pair ticker(s) to download. Default: SKHY. Use ALL for all "
+            "configured Korean/U.S. research pairs."
+        ),
+    )
+    parser.add_argument(
+        "--skip-controls",
+        action="store_true",
+        help="Skip common SPY, SOXX, QQQ, and USD/KRW downloads.",
+    )
     parser.add_argument("--skip-trades", action="store_true")
     parser.add_argument("--skip-quotes", action="store_true")
+    parser.add_argument(
+        "--full-ticks",
+        action="store_true",
+        help=(
+            "Also stream all selected U.S. trades/quotes for post-anchor "
+            "microstructure windows."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -275,58 +340,143 @@ def main() -> int:
     if start > end:
         raise SystemExit("start-date must not be later than end-date")
 
+    selected_pairs = (
+        list(RESEARCH_PAIRS)
+        if "ALL" in args.pairs
+        else [PAIR_BY_US_TICKER[ticker] for ticker in dict.fromkeys(args.pairs)]
+    )
+    selected_tickers = {pair.us_ticker for pair in selected_pairs}
+
     print(f"Downloading raw inclusive window {start} through {end}")
+    print("Research pairs: " + ", ".join(sorted(selected_tickers)))
+    print(
+        "Common controls: "
+        + ("skipped" if args.skip_controls else "SPY, SOXX, QQQ, USD/KRW")
+    )
     client = MassiveClient(load_secret())
     failures: list[str] = []
-    skhy_bars: pd.DataFrame | None = None
+    pair_bars: dict[str, pd.DataFrame] = {}
 
-    for ticker, target, include_volume in BAR_DATASETS:
+    pair_bar_datasets = [
+        (
+            pair.us_ticker,
+            RAW_DIR / "us" / f"{pair.us_ticker}_5min.parquet",
+            True,
+        )
+        for pair in selected_pairs
+    ]
+
+    bar_datasets = [
+        *pair_bar_datasets,
+        *([] if args.skip_controls else CONTROL_BAR_DATASETS),
+    ]
+    for ticker, target, include_volume in bar_datasets:
         label = ticker.removeprefix("C:")
         try:
             frame = client.get_aggregates(
                 ticker,
                 start.isoformat(),
                 end.isoformat(),
-                multiplier=1,
+                multiplier=BAR_MINUTES,
                 timespan="minute",
                 include_volume=include_volume,
             )
             if frame.empty:
-                raise RuntimeError("no one-minute aggregate rows returned")
+                raise RuntimeError("no five-minute aggregate rows returned")
             write_parquet(frame, target)
-            if ticker == "SKHY":
-                skhy_bars = frame
-            print(f"OK  {label:7} {len(frame):>10,} one-minute rows -> {target}")
+            if ticker in selected_tickers:
+                pair_bars[ticker] = frame
+            print(f"OK  {label:7} {len(frame):>10,} five-minute rows -> {target}")
         except Exception as exc:
             failures.append(f"{label}: {exc}")
             print(f"ERR {label:7} {exc}", file=sys.stderr)
 
-    korea_target = RAW_DIR / "korea" / "000660_daily.parquet"
-    try:
-        count = download_korean_daily(start, end, korea_target)
-        print(f"OK  000660  {count:>10,} daily rows -> {korea_target}")
-    except Exception as exc:
-        failures.append(f"000660: {exc}")
-        print(f"ERR 000660  {exc}", file=sys.stderr)
+    for pair in selected_pairs:
+        korea_target = (
+            RAW_DIR / "korea" / f"{pair.korea_file_stem}_daily.parquet"
+        )
+        try:
+            count = download_korean_daily(
+                pair.korea_ticker, start, end, korea_target
+            )
+            print(
+                f"OK  {pair.korea_file_stem:7} {count:>10,} daily rows -> "
+                f"{korea_target}"
+            )
+        except Exception as exc:
+            failures.append(f"{pair.korea_ticker}: {exc}")
+            print(f"ERR {pair.korea_ticker}  {exc}", file=sys.stderr)
 
-    if skhy_bars is not None:
-        schedule = _event_schedule(skhy_bars)
+    for pair in selected_pairs:
+        us_ticker = pair.us_ticker
+        us_bars = pair_bars.get(us_ticker)
+        if us_bars is None:
+            continue
+        schedule = _event_schedule(us_bars)
         if not args.skip_trades:
-            target = RAW_DIR / "us" / "SKHY_first_trades.parquet"
+            target = RAW_DIR / "us" / f"{us_ticker}_first_trades.parquet"
             count, warning = _download_first_events(
-                client, schedule, kind="trade", destination=target
+                client,
+                schedule,
+                ticker=us_ticker,
+                kind="trade",
+                destination=target,
             )
-            print(f"OK  trades   {count:>10,} event rows -> {target}")
+            print(
+                f"OK  {us_ticker:7} {count:>10,} first-trade rows -> {target}"
+            )
             if warning:
-                print(f"WARN trades   {warning}", file=sys.stderr)
+                print(f"WARN {us_ticker} trades   {warning}", file=sys.stderr)
         if not args.skip_quotes:
-            target = RAW_DIR / "us" / "SKHY_first_quotes.parquet"
+            target = RAW_DIR / "us" / f"{us_ticker}_first_quotes.parquet"
             count, warning = _download_first_events(
-                client, schedule, kind="quote", destination=target
+                client,
+                schedule,
+                ticker=us_ticker,
+                kind="quote",
+                destination=target,
             )
-            print(f"OK  quotes   {count:>10,} event rows -> {target}")
+            print(
+                f"OK  {us_ticker:7} {count:>10,} first-quote rows -> {target}"
+            )
             if warning:
-                print(f"WARN quotes   {warning}", file=sys.stderr)
+                print(f"WARN {us_ticker} quotes   {warning}", file=sys.stderr)
+
+        if args.full_ticks and not args.skip_trades:
+            target = RAW_DIR / "us" / f"{us_ticker}_trades.parquet"
+            try:
+                count = client.download_trades_parquet(
+                    us_ticker, start.isoformat(), end.isoformat(), target
+                )
+                print(
+                    f"OK  {us_ticker:7} {count:>10,} full trade rows -> {target}"
+                )
+            except MassiveAPIError as exc:
+                if _is_entitlement_error(exc):
+                    print(
+                        f"WARN {us_ticker} full trades   {exc}", file=sys.stderr
+                    )
+                else:
+                    failures.append(f"{us_ticker} full trades: {exc}")
+                    print(f"ERR {us_ticker} full trades   {exc}", file=sys.stderr)
+
+        if args.full_ticks and not args.skip_quotes:
+            target = RAW_DIR / "us" / f"{us_ticker}_quotes.parquet"
+            try:
+                count = client.download_quotes_parquet(
+                    us_ticker, start.isoformat(), end.isoformat(), target
+                )
+                print(
+                    f"OK  {us_ticker:7} {count:>10,} full quote rows -> {target}"
+                )
+            except MassiveAPIError as exc:
+                if _is_entitlement_error(exc):
+                    print(
+                        f"WARN {us_ticker} full quotes   {exc}", file=sys.stderr
+                    )
+                else:
+                    failures.append(f"{us_ticker} full quotes: {exc}")
+                    print(f"ERR {us_ticker} full quotes   {exc}", file=sys.stderr)
 
     if failures:
         print("\nCompleted with failures:", file=sys.stderr)

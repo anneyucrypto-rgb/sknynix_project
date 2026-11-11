@@ -1,0 +1,11 @@
+python3 download.py --start-date 2026-06-01 --end-date 2026-11-11 --pairs LPL --full-ticks --skip-controls
+
+SKHY / 000660.KS
+LPL / 034220.KS
+SKM / 017670.KS
+KT / 030200.KS
+PKX / 005490.KS
+KB / 105560.KS
+SHG / 055550.KS
+WF / 316140.KS
+KEP / 015760.KS

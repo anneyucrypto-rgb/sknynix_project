@@ -53,6 +53,20 @@ QUOTE_COLUMNS = [
     "indicators",
     "tape",
 ]
+TRADE_COLUMNS = [
+    "ticker",
+    "sip_timestamp",
+    "sip_datetime",
+    "participant_timestamp",
+    "participant_datetime",
+    "trf_timestamp",
+    "sequence_number",
+    "price",
+    "size",
+    "exchange",
+    "conditions",
+    "tape",
+]
 
 
 class MassiveAPIError(RuntimeError):
@@ -241,7 +255,7 @@ class MassiveClient:
         params = {
             "timestamp.gte": start_date,
             "timestamp.lt": f"{end_date}T23:59:59.999999999Z",
-            "sort": "sip_timestamp",
+            "sort": "timestamp",
             "order": "asc",
             "limit": 50_000,
         }
@@ -275,6 +289,60 @@ class MassiveClient:
             empty = _empty_quote_frame()
             pq.write_table(
                 pa.Table.from_pandas(empty, preserve_index=False),
+                temporary,
+                compression="zstd",
+            )
+        os.replace(temporary, destination)
+        return total
+
+    def download_trades_parquet(
+        self,
+        ticker: str,
+        start_date: str,
+        end_date: str,
+        destination: Path,
+    ) -> int:
+        """Stream raw trade pages into Parquet without retaining all ticks in RAM."""
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_suffix(destination.suffix + ".part")
+        writer: pq.ParquetWriter | None = None
+        total = 0
+        params = {
+            "timestamp.gte": start_date,
+            "timestamp.lt": f"{end_date}T23:59:59.999999999Z",
+            "sort": "timestamp",
+            "order": "asc",
+            "limit": 50_000,
+        }
+
+        try:
+            for page in self.iter_pages(f"/v3/trades/{ticker}", params):
+                if not page:
+                    continue
+                frame = _normalize_trades(page, ticker)
+                table = pa.Table.from_pandas(frame, preserve_index=False)
+                if writer is None:
+                    writer = pq.ParquetWriter(
+                        temporary,
+                        table.schema,
+                        compression="zstd",
+                        use_dictionary=True,
+                    )
+                writer.write_table(table)
+                total += len(frame)
+        except Exception:
+            if writer is not None:
+                writer.close()
+                writer = None
+            temporary.unlink(missing_ok=True)
+            raise
+        finally:
+            if writer is not None:
+                writer.close()
+
+        if total == 0:
+            pq.write_table(
+                pa.Table.from_pandas(_empty_trade_frame(), preserve_index=False),
                 temporary,
                 compression="zstd",
             )
@@ -336,8 +404,55 @@ def _normalize_quotes(records: list[dict[str, Any]], ticker: str) -> pd.DataFram
     return frame[QUOTE_COLUMNS]
 
 
+def _normalize_trades(records: list[dict[str, Any]], ticker: str) -> pd.DataFrame:
+    frame = pd.DataFrame.from_records(records)
+    frame.insert(0, "ticker", ticker)
+    for raw, converted in (
+        ("sip_timestamp", "sip_datetime"),
+        ("participant_timestamp", "participant_datetime"),
+    ):
+        if raw not in frame:
+            frame[raw] = pd.NA
+        frame[converted] = pd.to_datetime(
+            frame[raw], unit="ns", utc=True, errors="coerce"
+        )
+    if "conditions" not in frame:
+        frame["conditions"] = None
+    frame["conditions"] = frame["conditions"].map(
+        lambda value: json.dumps(value, separators=(",", ":"))
+        if isinstance(value, (list, dict))
+        else None
+    )
+    for column in (
+        "sip_timestamp",
+        "participant_timestamp",
+        "trf_timestamp",
+        "sequence_number",
+        "exchange",
+        "tape",
+    ):
+        if column not in frame:
+            frame[column] = pd.NA
+        frame[column] = pd.to_numeric(frame[column], errors="coerce").astype("Int64")
+    for column in ("price", "size"):
+        if column not in frame:
+            frame[column] = pd.NA
+        frame[column] = pd.to_numeric(frame[column], errors="coerce").astype("Float64")
+    for column in TRADE_COLUMNS:
+        if column not in frame:
+            frame[column] = pd.NA
+    return frame[TRADE_COLUMNS]
+
+
 def _empty_quote_frame() -> pd.DataFrame:
     frame = pd.DataFrame({column: pd.Series(dtype="object") for column in QUOTE_COLUMNS})
+    for column in ("sip_datetime", "participant_datetime"):
+        frame[column] = pd.Series(dtype="datetime64[ns, UTC]")
+    return frame
+
+
+def _empty_trade_frame() -> pd.DataFrame:
+    frame = pd.DataFrame({column: pd.Series(dtype="object") for column in TRADE_COLUMNS})
     for column in ("sip_datetime", "participant_datetime"):
         frame[column] = pd.Series(dtype="datetime64[ns, UTC]")
     return frame

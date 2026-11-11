@@ -8,7 +8,7 @@ import pandas as pd
 PROJECT = Path(__file__).resolve().parents[1]
 DATASETS = {
     "granger": PROJECT / "data" / "processed" / "granger_panel.parquet",
-    "arbitrage": PROJECT / "data" / "processed" / "arbitrage_panel_1min.parquet",
+    "arbitrage": PROJECT / "data" / "processed" / "arbitrage_panel_5min.parquet",
 }
 
 

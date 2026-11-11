@@ -20,18 +20,27 @@ NY_TZ: Final = ZoneInfo("America/New_York")
 SEOUL_TZ: Final = ZoneInfo("Asia/Seoul")
 UTC_TZ: Final = ZoneInfo("UTC")
 HORIZONS: Final = (5, 10, 30, 60, 90, 120)
+MICROSTRUCTURE_WINDOWS: Final = (1, 5, 10, 30, 60)
+BAR_MINUTES: Final = 5
+PRE_EVENT_WINDOW_MINUTES: Final = 30
+PRE_EVENT_BAR_COUNT: Final = PRE_EVENT_WINDOW_MINUTES // BAR_MINUTES
 EVENT_ANCHORS: Final = (
     ("premarket_0400", time(4, 0)),
     ("regular_0930", time(9, 30)),
 )
 
 RAW_FILES: Final = {
-    "skhy": Path("us/SKHY_1min.parquet"),
-    "spy": Path("us/SPY_1min.parquet"),
-    "soxx": Path("us/SOXX_1min.parquet"),
-    "qqq": Path("us/QQQ_1min.parquet"),
-    "usdkrw": Path("fx/USDKRW_1min.parquet"),
+    "skhy": Path("us/SKHY_5min.parquet"),
+    "spy": Path("us/SPY_5min.parquet"),
+    "soxx": Path("us/SOXX_5min.parquet"),
+    "qqq": Path("us/QQQ_5min.parquet"),
+    "usdkrw": Path("fx/USDKRW_5min.parquet"),
     "korea": Path("korea/000660_daily.parquet"),
+}
+
+TICK_FILES: Final = {
+    "trades": Path("us/SKHY_trades.parquet"),
+    "quotes": Path("us/SKHY_quotes.parquet"),
 }
 
 
@@ -96,6 +105,234 @@ def _load_optional_events(path: Path, timestamp_column: str) -> pd.DataFrame:
     )
     frame[timestamp_column] = pd.to_datetime(frame[timestamp_column], utc=True)
     return frame
+
+
+def _load_optional_ticks(path: Path, kind: str) -> tuple[pd.DataFrame, bool]:
+    """Load optional full-tick data; false means the source is unavailable.
+
+    These are intentionally different from SKHY_first_trades/quotes.parquet,
+    which contain only one observation per event and cannot support window
+    counts or averages.
+    """
+    if not path.is_file() or path.stat().st_size == 0:
+        return pd.DataFrame(), False
+    frame = pd.read_parquet(path).copy()
+    if frame.empty:
+        return frame, False
+
+    datetime_candidates = ("timestamp_utc", "sip_datetime", "timestamp")
+    timestamp_column = next(
+        (column for column in datetime_candidates if column in frame), None
+    )
+    if timestamp_column is not None:
+        frame["timestamp_utc"] = pd.to_datetime(
+            frame[timestamp_column], utc=True, errors="coerce"
+        )
+    elif "sip_timestamp" in frame:
+        frame["timestamp_utc"] = pd.to_datetime(
+            frame["sip_timestamp"], unit="ns", utc=True, errors="coerce"
+        )
+    else:
+        raise ValueError(f"{path} has no supported tick timestamp column")
+
+    if kind == "trades":
+        frame = frame.rename(
+            columns={"price": "trade_price", "size": "trade_size"}
+        )
+        required = {"trade_price", "trade_size"}
+    elif kind == "quotes":
+        required = {"bid_price", "ask_price", "bid_size", "ask_size"}
+    else:
+        raise ValueError(f"Unsupported tick kind: {kind}")
+
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(f"{path} is missing columns: {sorted(missing)}")
+    for column in required:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+
+    frame = frame.dropna(subset=["timestamp_utc"]).sort_values("timestamp_utc")
+    frame["event_date_ny"] = frame["timestamp_utc"].dt.tz_convert(NY_TZ).dt.date
+    if kind == "trades":
+        frame = frame[
+            (frame["trade_price"] > 0) & (frame["trade_size"] > 0)
+        ]
+    else:
+        frame = frame[
+            (frame["bid_price"] > 0)
+            & (frame["ask_price"] > 0)
+            & (frame["ask_price"] >= frame["bid_price"])
+            & (frame["bid_size"] >= 0)
+            & (frame["ask_size"] >= 0)
+        ].copy()
+        frame["midpoint"] = (frame["bid_price"] + frame["ask_price"]) / 2.0
+        frame["relative_spread"] = (
+            frame["ask_price"] - frame["bid_price"]
+        ) / frame["midpoint"]
+        depth = frame["bid_size"] + frame["ask_size"]
+        frame["quote_imbalance"] = np.where(
+            depth > 0,
+            (frame["bid_size"] - frame["ask_size"]) / depth,
+            np.nan,
+        )
+    return frame.reset_index(drop=True), True
+
+
+def _weighted_mean(values: pd.Series, weights: pd.Series) -> float:
+    valid = values.notna() & weights.notna() & (weights > 0)
+    if not valid.any():
+        return np.nan
+    return float(np.average(values[valid], weights=weights[valid]))
+
+
+def _classify_window_trades(
+    trades: pd.DataFrame, quotes: pd.DataFrame
+) -> pd.DataFrame:
+    """Apply the quote rule with a tick-rule fallback and attach midpoints."""
+    classified = trades.sort_values("timestamp_utc").copy()
+    price_change = classified["trade_price"].diff()
+    tick_sign = np.sign(price_change).replace(0, np.nan).ffill()
+    classified["trade_sign"] = tick_sign
+    classified["midpoint"] = np.nan
+
+    if quotes.empty:
+        return classified
+
+    quote_state = quotes[["timestamp_utc", "midpoint"]].sort_values(
+        "timestamp_utc"
+    )
+    classified = pd.merge_asof(
+        classified.sort_values("timestamp_utc"),
+        quote_state,
+        on="timestamp_utc",
+        direction="backward",
+        tolerance=pd.Timedelta(minutes=5),
+        suffixes=("", "_quote"),
+    )
+    classified["midpoint"] = classified["midpoint_quote"]
+    classified = classified.drop(columns=["midpoint_quote"])
+    above = classified["trade_price"] > classified["midpoint"]
+    below = classified["trade_price"] < classified["midpoint"]
+    classified.loc[above, "trade_sign"] = 1.0
+    classified.loc[below, "trade_sign"] = -1.0
+    return classified
+
+
+def _tick_window_features(
+    trades: pd.DataFrame,
+    quotes: pd.DataFrame,
+    anchor_timestamp: pd.Timestamp,
+    *,
+    trades_available: bool,
+    quotes_available: bool,
+) -> dict[str, Any]:
+    """Aggregate post-anchor trades and quotes over nested event windows.
+
+    Windows are half-open: [anchor, anchor + w minutes). Spread and imbalance
+    are arithmetic means across valid quote updates. Trade VWAP, effective
+    spread, and price impact are share-volume weighted.
+    """
+    features: dict[str, Any] = {
+        "trade_ticks_available": trades_available,
+        "quote_ticks_available": quotes_available,
+    }
+    for window_minutes in MICROSTRUCTURE_WINDOWS:
+        suffix = f"0_{window_minutes}m"
+        end = anchor_timestamp + pd.Timedelta(minutes=window_minutes)
+        trade_window = (
+            trades[
+                (trades["timestamp_utc"] >= anchor_timestamp)
+                & (trades["timestamp_utc"] < end)
+            ]
+            if trades_available
+            else pd.DataFrame()
+        )
+        quote_window = (
+            quotes[
+                (quotes["timestamp_utc"] >= anchor_timestamp)
+                & (quotes["timestamp_utc"] < end)
+            ]
+            if quotes_available
+            else pd.DataFrame()
+        )
+
+        features[f"trade_count_{suffix}"] = (
+            int(len(trade_window)) if trades_available else np.nan
+        )
+        features[f"trade_volume_{suffix}"] = (
+            float(trade_window["trade_size"].sum()) if trades_available else np.nan
+        )
+        features[f"trade_vwap_{suffix}"] = (
+            _weighted_mean(trade_window["trade_price"], trade_window["trade_size"])
+            if trades_available and not trade_window.empty
+            else np.nan
+        )
+        features[f"quote_count_{suffix}"] = (
+            int(len(quote_window)) if quotes_available else np.nan
+        )
+        features[f"relative_spread_mean_{suffix}"] = (
+            float(quote_window["relative_spread"].mean())
+            if quotes_available and not quote_window.empty
+            else np.nan
+        )
+        features[f"quote_imbalance_mean_{suffix}"] = (
+            float(quote_window["quote_imbalance"].mean())
+            if quotes_available and not quote_window.empty
+            else np.nan
+        )
+
+        if not trades_available or trade_window.empty:
+            features[f"signed_volume_{suffix}"] = (
+                0.0 if trades_available else np.nan
+            )
+            features[f"effective_spread_bps_{suffix}"] = np.nan
+            features[f"price_impact_bps_{suffix}"] = np.nan
+            continue
+
+        quote_history = (
+            quotes[
+                (quotes["timestamp_utc"] <= end)
+                & (
+                    quotes["timestamp_utc"]
+                    >= anchor_timestamp - pd.Timedelta(minutes=5)
+                )
+            ]
+            if quotes_available
+            else pd.DataFrame()
+        )
+        classified = _classify_window_trades(trade_window, quote_history)
+        signed_size = classified["trade_sign"] * classified["trade_size"]
+        features[f"signed_volume_{suffix}"] = (
+            float(signed_size.sum(min_count=1))
+            if signed_size.notna().any()
+            else np.nan
+        )
+
+        effective_spread = (
+            2.0
+            * (classified["trade_price"] - classified["midpoint"]).abs()
+            / classified["midpoint"]
+            * 10_000.0
+        )
+        features[f"effective_spread_bps_{suffix}"] = _weighted_mean(
+            effective_spread, classified["trade_size"]
+        )
+
+        if quote_history.empty:
+            features[f"price_impact_bps_{suffix}"] = np.nan
+        else:
+            end_midpoint = float(quote_history.iloc[-1]["midpoint"])
+            price_impact = (
+                2.0
+                * classified["trade_sign"]
+                * (end_midpoint - classified["midpoint"])
+                / classified["midpoint"]
+                * 10_000.0
+            )
+            features[f"price_impact_bps_{suffix}"] = _weighted_mean(
+                price_impact, classified["trade_size"]
+            )
+    return features
 
 
 def _date_groups(frame: pd.DataFrame) -> dict[date, pd.DataFrame]:
@@ -174,11 +411,13 @@ def _pre_event_features(
 
     returns = np.log(window["close"]).diff() if not window.empty else pd.Series(dtype=float)
     realized_volatility = (
-        float(np.sqrt(np.nansum(np.square(returns)))) if len(window) == 30 else np.nan
+        float(np.sqrt(np.nansum(np.square(returns))))
+        if len(window) == PRE_EVENT_BAR_COUNT
+        else np.nan
     )
     log_volume = (
         float(np.log1p(window["volume"].sum()))
-        if len(window) == 30 and "volume" in window
+        if len(window) == PRE_EVENT_BAR_COUNT and "volume" in window
         else np.nan
     )
     reference = window.iloc[-1] if not window.empty else previous_close
@@ -192,7 +431,7 @@ def _pre_event_features(
         "rv_30m": realized_volatility,
         "log_volume_30m": log_volume,
         "vwap_deviation": vwap_deviation,
-        "window_available": len(window) == 30,
+        "window_available": len(window) == PRE_EVENT_BAR_COUNT,
     }
 
 
@@ -203,14 +442,14 @@ def _future_return(
 ) -> tuple[float, pd.Timestamp | pd.NaT, float]:
     """Return log(P[t0+h] / P[t0]), target timestamp, and P[t0+h].
 
-    P[t0] is the opening price of the first qualifying one-minute bar at or
-    after the scheduled event anchor. P[t0+h] is the close of the one-minute
+    P[t0] is the opening price of the first qualifying five-minute bar at or
+    after the scheduled event anchor. P[t0+h] is the close of the five-minute
     bar ending exactly h minutes after that actual anchor.
     """
     if anchor_bar is None:
         return np.nan, pd.NaT, np.nan
     target_start = anchor_bar["timestamp_utc"] + pd.Timedelta(
-        minutes=horizon_minutes - 1
+        minutes=horizon_minutes - BAR_MINUTES
     )
     target = _exact_bar(group, target_start)
     if target is None:
@@ -218,7 +457,7 @@ def _future_return(
     target_price = target.get("close")
     return (
         _safe_log_ratio(target_price, anchor_bar.get("open")),
-        target["timestamp_utc"] + pd.Timedelta(minutes=1),
+        target["timestamp_utc"] + pd.Timedelta(minutes=BAR_MINUTES),
         float(target_price) if pd.notna(target_price) else np.nan,
     )
 
@@ -237,12 +476,23 @@ def build_granger_panel(
     korea: pd.DataFrame,
     trades: pd.DataFrame,
     quotes: pd.DataFrame,
+    tick_trades: pd.DataFrame,
+    tick_quotes: pd.DataFrame,
+    *,
+    tick_trades_available: bool,
+    tick_quotes_available: bool,
 ) -> pd.DataFrame:
     """Create one wide feature row per U.S. event date and anchor."""
     groups = {name: _date_groups(frame) for name, frame in bars.items() if name != "usdkrw"}
     skhy_groups = groups["skhy"]
     trade_lookup = _event_lookup(trades)
     quote_lookup = _event_lookup(quotes)
+    tick_trade_groups = (
+        _date_groups(tick_trades) if tick_trades_available else {}
+    )
+    tick_quote_groups = (
+        _date_groups(tick_quotes) if tick_quotes_available else {}
+    )
     rows: list[dict[str, Any]] = []
 
     for event_date in sorted(skhy_groups):
@@ -364,6 +614,16 @@ def build_granger_panel(
                 fx_pre.get("close") if fx_pre is not None else np.nan,
             )
 
+            row.update(
+                _tick_window_features(
+                    tick_trade_groups.get(event_date, pd.DataFrame()),
+                    tick_quote_groups.get(event_date, pd.DataFrame()),
+                    skhy_anchor["timestamp_utc"],
+                    trades_available=tick_trades_available,
+                    quotes_available=tick_quotes_available,
+                )
+            )
+
             for horizon in HORIZONS:
                 for name in ("skhy", "spy", "soxx", "qqq"):
                     value, target_time, target_price = _future_return(
@@ -457,7 +717,7 @@ def build_arbitrage_panel(
     granger_panel: pd.DataFrame,
     ads_shares_per_ads: float,
 ) -> pd.DataFrame:
-    """Create a one-minute panel with FX parity, premium, and residual features."""
+    """Create a five-minute panel with FX parity, premium, and residual features."""
     skhy = bars["skhy"].copy().sort_values("timestamp_utc")
     fx = bars["usdkrw"][["timestamp_utc", "close"]].rename(
         columns={"close": "usdkrw_close"}
@@ -505,12 +765,13 @@ def build_arbitrage_panel(
         panel["close"] / panel["korea_parity_usd_per_ads"]
     )
     panel["arbitrage_premium_pct"] = np.expm1(panel["arbitrage_premium_log"])
-    panel["skhy_return_1m"] = np.log(panel["close"]).diff()
-    panel["usdkrw_return_1m"] = np.log(panel["usdkrw_close"]).diff()
+    panel["skhy_return_5m"] = np.log(panel["close"]).diff()
+    panel["usdkrw_return_5m"] = np.log(panel["usdkrw_close"]).diff()
 
     for window in (30, 60, 120, 390):
+        observations = window // BAR_MINUTES
         rolling = panel["arbitrage_premium_log"].rolling(
-            window, min_periods=max(10, window // 4)
+            observations, min_periods=max(2, observations // 4)
         )
         mean = rolling.mean()
         std = rolling.std(ddof=1)
@@ -569,13 +830,28 @@ def build_processed_panels(
     quotes = _load_optional_events(
         raw_dir / "us" / "SKHY_first_quotes.parquet", "t_first_quote"
     )
+    tick_trades, tick_trades_available = _load_optional_ticks(
+        raw_dir / TICK_FILES["trades"], "trades"
+    )
+    tick_quotes, tick_quotes_available = _load_optional_ticks(
+        raw_dir / TICK_FILES["quotes"], "quotes"
+    )
 
-    granger_panel = build_granger_panel(bars, korea, trades, quotes)
+    granger_panel = build_granger_panel(
+        bars,
+        korea,
+        trades,
+        quotes,
+        tick_trades,
+        tick_quotes,
+        tick_trades_available=tick_trades_available,
+        tick_quotes_available=tick_quotes_available,
+    )
     arbitrage_panel = build_arbitrage_panel(
         bars, korea, granger_panel, ads_shares_per_ads
     )
     granger_path = processed_dir / "granger_panel.parquet"
-    arbitrage_path = processed_dir / "arbitrage_panel_1min.parquet"
+    arbitrage_path = processed_dir / "arbitrage_panel_5min.parquet"
     _atomic_parquet(granger_panel, granger_path)
     _atomic_parquet(arbitrage_panel, arbitrage_path)
     return {

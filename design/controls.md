@@ -242,8 +242,6 @@ I would use the following nested models for each ADR and horizon.
 | A4    | + ADR liquidity features | Does it survive microstructure controls?    |
 | A5    | + firm-event indicators  | Is it robust to firm-specific news?         |
 
-These should be cumulative only where the controls satisfy the timing rules. I would also run separate macro-only, sector-only, and liquidity-only ablations to identify which control group changes the Korean coefficient most.
-
 With your current approximately 82-day dataset, the full model would likely be overparameterized. Extend the history to at least 12–24 months, keep the number of regressors small, and use BIC plus walk-forward validation.
 
 ## 7. Data acquisition priorities
@@ -262,26 +260,8 @@ For your existing Massive → Parquet → DuckDB architecture:
 | Company financial fundamentals | DART, SEC filings                          | Quarterly/event data     |
 | Commodities                    | Licensed futures/commodity data provider   | Daily/intraday           |
 
-For fundamental variables, store both the reporting period and public release timestamp. Otherwise, a quarterly financial figure could accidentally enter your backtest before investors actually knew it.
 
-## 8. My recommended implementation order
 
-Phase 1 — Core market controls
 
-Implement all eight pairs with SPY, KOSPI, USD/KRW, and sector ETFs. This provides a consistent baseline across industries.
 
-Phase 2 — Sector-specific controls
 
-Add Korean yields for banks and telecoms, commodity prices for POSCO and KEPCO, and electronics-demand proxies for LG Display.
-
-Phase 3 — Market microstructure
-
-Introduce trade staleness, spreads, relative volume, and opening liquidity. Compare the 04:00 and 09:30 anchors.
-
-Phase 4 — Comparative inference and trading
-
-Estimate Korean-return coefficients across companies, compare out-of-sample improvements, and test whether pricing deviations exceed realistic transaction costs.
-
-For your ultimate arbitrage objective, I would also add a second model alongside ARDL: an ADR fair-value error-correction model using Korean prices, currency conversion, and the verified ADR ratio. ARDL answers whether Korean returns predict U.S. returns; the error-correction model answers whether the ADR is mispriced relative to the Korean underlying and whether that deviation subsequently closes.
-
-That combination is more informative for trading than adding an increasingly large number of macroeconomic variables to ARDL alone.

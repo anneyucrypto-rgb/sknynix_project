@@ -9,11 +9,13 @@ import os
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from io import StringIO
 from pathlib import Path
 from typing import Any, Final
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import requests
 
 from massive_client import MassiveAPIError, MassiveClient, write_parquet
 
@@ -32,6 +34,11 @@ CONTROL_BAR_DATASETS: Final = (
     ("QQQ", RAW_DIR / "us" / "QQQ_5min.parquet", True),
     ("C:USDKRW", RAW_DIR / "fx" / "USDKRW_5min.parquet", True),
 )
+COMMON_DAILY_CONTROLS: Final = (
+    ("^KS11", RAW_DIR / "macro" / "KOSPI_daily.parquet"),
+    ("^VIX", RAW_DIR / "macro" / "VIX_daily.parquet"),
+)
+FRED_YIELD_SERIES: Final = ("DGS2", "DGS10")
 EVENT_ANCHORS: Final = (
     ("premarket_0400", time(4, 0)),
     ("regular_0930", time(9, 30)),
@@ -139,6 +146,34 @@ def download_korean_daily(
         ],
         destination,
     )
+    return len(frame)
+
+
+def download_us_treasury_yields(
+    start: date, end: date, destination: Path
+) -> int:
+    """Download official daily U.S. 2Y/10Y Treasury yields from FRED."""
+    url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=" + ",".join(
+        FRED_YIELD_SERIES
+    )
+    response = requests.get(url, timeout=60)
+    response.raise_for_status()
+    frame = pd.read_csv(StringIO(response.text)).rename(
+        columns={
+            "observation_date": "date",
+            "DGS2": "us_2y_yield",
+            "DGS10": "us_10y_yield",
+        }
+    )
+    frame["date"] = pd.to_datetime(frame["date"])
+    for column in ("us_2y_yield", "us_10y_yield"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame = frame[
+        (frame["date"].dt.date >= start) & (frame["date"].dt.date <= end)
+    ].dropna(how="all", subset=["us_2y_yield", "us_10y_yield"])
+    if frame.empty:
+        raise RuntimeError("FRED returned no U.S. Treasury yield observations")
+    write_parquet(frame, destination)
     return len(frame)
 
 
@@ -318,7 +353,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-controls",
         action="store_true",
-        help="Skip common SPY, SOXX, QQQ, and USD/KRW downloads.",
+        help=(
+            "Skip common SPY, SOXX, QQQ, USD/KRW, KOSPI, VIX, and U.S. "
+            "Treasury-control downloads."
+        ),
     )
     parser.add_argument("--skip-trades", action="store_true")
     parser.add_argument("--skip-quotes", action="store_true")
@@ -351,7 +389,11 @@ def main() -> int:
     print("Research pairs: " + ", ".join(sorted(selected_tickers)))
     print(
         "Common controls: "
-        + ("skipped" if args.skip_controls else "SPY, SOXX, QQQ, USD/KRW")
+        + (
+            "skipped"
+            if args.skip_controls
+            else "SPY, SOXX, QQQ, USD/KRW, KOSPI, VIX, U.S. 2Y/10Y"
+        )
     )
     client = MassiveClient(load_secret())
     failures: list[str] = []
@@ -390,6 +432,30 @@ def main() -> int:
         except Exception as exc:
             failures.append(f"{label}: {exc}")
             print(f"ERR {label:7} {exc}", file=sys.stderr)
+
+    if not args.skip_controls:
+        macro_start = start - timedelta(days=10)
+        for ticker, target in COMMON_DAILY_CONTROLS:
+            try:
+                count = download_korean_daily(ticker, macro_start, end, target)
+                print(
+                    f"OK  {ticker:7} {count:>10,} daily control rows -> {target}"
+                )
+            except Exception as exc:
+                failures.append(f"{ticker}: {exc}")
+                print(f"ERR {ticker:7} {exc}", file=sys.stderr)
+
+        treasury_target = RAW_DIR / "macro" / "US_TREASURY_daily.parquet"
+        try:
+            count = download_us_treasury_yields(
+                macro_start, end, treasury_target
+            )
+            print(
+                f"OK  FRED    {count:>10,} U.S. yield rows -> {treasury_target}"
+            )
+        except Exception as exc:
+            failures.append(f"FRED yields: {exc}")
+            print(f"ERR FRED yields  {exc}", file=sys.stderr)
 
     for pair in selected_pairs:
         korea_target = (

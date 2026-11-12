@@ -77,6 +77,14 @@ def main() -> None:
         "t_first_minute_bar",
         "trade_ticks_available",
         "quote_ticks_available",
+        "spy_pre_event_return_5m",
+        "soxx_pre_event_return_5m",
+        "qqq_pre_event_return_5m",
+        "kospi_return_latest",
+        "vix_level_lag1d",
+        "vix_change_lag1d",
+        "us_2y_yield_change_lag1d",
+        "us_10y_yield_change_lag1d",
         *(
             f"{metric}_0_{window}m"
             for metric in MICROSTRUCTURE_METRICS

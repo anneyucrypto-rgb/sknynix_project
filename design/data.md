@@ -40,7 +40,11 @@ data/
 │   │   ├── SKHY_trades.parquet        # optional full tick history
 │   │   └── SKHY_quotes.parquet        # optional full NBBO history
 │   ├── korea/000660_daily.parquet
-│   └── fx/USDKRW_5min.parquet
+│   ├── fx/USDKRW_5min.parquet
+│   └── macro/
+│       ├── KOSPI_daily.parquet
+│       ├── VIX_daily.parquet
+│       └── US_TREASURY_daily.parquet
 └── processed/
     ├── granger_panel.parquet
     └── arbitrage_panel_5min.parquet
@@ -85,7 +89,7 @@ python ingestion/download.py --start-date YYYY-MM-DD --end-date YYYY-MM-DD --pai
 # All pairs plus complete trade and quote histories
 python ingestion/download.py --start-date YYYY-MM-DD --end-date YYYY-MM-DD --pairs ALL --full-ticks
 
-# Download selected target pairs only; skip SPY, SOXX, QQQ, and USD/KRW
+# Download selected target pairs only; skip all common control series
 python ingestion/download.py --start-date YYYY-MM-DD --end-date YYYY-MM-DD --pairs SKHY LPL --skip-controls
 ```
 
@@ -104,11 +108,11 @@ SPY, SOXX, QQQ, and USD/KRW are downloaded once as common controls. The
 current processed feature builders remain SKHY-specific; the additional raw
 pairs are ready for subsequent pair-indexed panel construction.
 
-`--skip-controls` suppresses only the four common-control downloads. It does
-not skip either side of a selected target pair: the U.S. five-minute bars and
-the matched Korean daily prices are still downloaded. Building the complete
-ARDL feature panel later requires existing control files or a subsequent run
-without `--skip-controls`.
+`--skip-controls` suppresses SPY, SOXX, QQQ, USD/KRW, KOSPI, VIX, and U.S.
+2Y/10Y Treasury downloads. It does not skip either side of a selected target
+pair: the U.S. five-minute bars and matched Korean daily prices are still
+downloaded. Building the complete ARDL feature panel later requires existing
+control files or a subsequent run without `--skip-controls`.
 
 ## Event indexing and information availability
 
@@ -330,12 +334,15 @@ r^{m,pre}_{d}=\begin{cases}
 | `spy_pre_event_return` | Broad-market return control |
 | `soxx_pre_event_return` | Semiconductor-sector return control |
 | `qqq_pre_event_return` | Technology-market robustness control |
+| `spy_pre_event_return_5m` | Exact SPY five-minute return ending at 09:30; null at 04:00 |
+| `soxx_pre_event_return_5m` | Exact SOXX five-minute return ending at 09:30; null at 04:00 |
+| `qqq_pre_event_return_5m` | Exact QQQ five-minute return ending at 09:30; null at 04:00 |
 
 SOXX is the preferred sector control. Use SPY as the broad-market control and
 QQQ as a replacement robustness control; including all three requires a
 multicollinearity check.
 
-### Predetermined currency control
+### Predetermined macro controls
 
 Let `F(t)` be the latest USD/KRW close available no later than `t`:
 
@@ -343,7 +350,21 @@ Let `F(t)` be the latest USD/KRW close available no later than `t`:
 usdkrw\_return\_latest=\ln\left(\frac{F(t_0)}{F(t_0-30m)}\right).
 \]
 
-This is the implemented FX predictor known at the anchor.
+The implemented macro block is:
+
+| Column | Definition |
+|---|---|
+| `spy_pre_event_return_5m` or `spy_pre_event_return` | Broad U.S. market return; exact five-minute value at 09:30 and previous-close-to-anchor value at 04:00 |
+| `kospi_return_latest` | Latest available KOSPI adjusted-close log return |
+| `usdkrw_return_latest` | FX return defined above |
+| `vix_level_lag1d` | Latest VIX close available before the anchor |
+| `vix_change_lag1d` | Latest VIX close-to-close point change |
+| `us_2y_yield_change_lag1d` | Latest available daily change in the U.S. 2-year Treasury yield, percentage points |
+| `us_10y_yield_change_lag1d` | Latest available daily change in the U.S. 10-year Treasury yield, percentage points |
+
+Korea 3Y/10Y yield changes and a Korean sector-index return are not currently
+ingested because no validated project source is configured. They are excluded,
+not replaced with ETF or maturity proxies.
 
 ### Calendar, timing, and quality controls
 
@@ -472,14 +493,11 @@ H_0:\beta_{0,h}=\beta_{1,h}=\cdots=\beta_{q,h}=0.
 
 | Ablation | Controls added to AR base |
 |---|---|
-| A0 | None |
-| A1 | Microstructure |
-| A2 | Market |
-| A3 | Currency |
-| A4 | Microstructure + market |
-| A5 | Microstructure + currency |
-| A6 | Market + currency |
-| A7 | All available controls |
+| `baseline` | No additional group |
+| `macro_only` | SPY, KOSPI, USD/KRW, VIX level/change, U.S. 2Y/10Y changes |
+| `sector_only` | SOXX pre-event return |
+| `liquidity_only` | SKHY pre-event volume z-score and VWAP deviation |
+| `microstructure_only` | SKHY pre-event realized volatility plus the liquidity block |
 
 The named control groups are:
 
@@ -488,18 +506,28 @@ Own-history base:
     same-response lag1/lag2 selected by p
     skhy_pre_event_return                 # post-anchor response only
 
+Liquidity:
+    skhy_pre_event_volume_z
+    skhy_vwap_deviation
+
 Microstructure:
     skhy_pre_event_rv_30m
     skhy_pre_event_volume_z
     skhy_vwap_deviation
 
-Market:
-    spy_pre_event_return
-    soxx_pre_event_return
-    qqq_pre_event_return                  # replacement robustness control
-
-Currency:
+Macro:
+    spy_pre_event_return_5m               # 09:30
+    spy_pre_event_return                  # 04:00 fallback
+    kospi_return_latest
     usdkrw_return_latest
+    vix_level_lag1d
+    vix_change_lag1d
+    us_2y_yield_change_lag1d
+    us_10y_yield_change_lag1d
+
+Sector:
+    soxx_pre_event_return_5m              # 09:30
+    soxx_pre_event_return                 # 04:00 fallback
 
 Calendar/quality robustness:
     iso_day_of_week
@@ -541,7 +569,7 @@ The following tables account for every physical column currently written to
 the two processed Parquet files. Dtypes are the pandas/Parquet read dtypes in
 the current build.
 
-### `granger_panel.parquet` — 181 columns
+### `granger_panel.parquet` — 189 columns
 
 | Column | Dtype | Definition and econometric role |
 |---|---|---|
@@ -589,7 +617,15 @@ the current build.
 | `spy_pre_event_return` | `float64` | Predetermined SPY return over the analogous pre-anchor interval; broad-market control. |
 | `soxx_pre_event_return` | `float64` | Predetermined SOXX return over the analogous pre-anchor interval; preferred semiconductor control. |
 | `qqq_pre_event_return` | `float64` | Predetermined QQQ return over the analogous pre-anchor interval; technology robustness control. |
+| `spy_pre_event_return_5m` | `float64` | Exact SPY five-minute return ending at the anchor; available at 09:30 and null at 04:00. |
+| `soxx_pre_event_return_5m` | `float64` | Exact SOXX five-minute return ending at the anchor; available at 09:30 and null at 04:00. |
+| `qqq_pre_event_return_5m` | `float64` | Exact QQQ five-minute return ending at the anchor; available at 09:30 and null at 04:00. |
 | `usdkrw_return_latest` | `float64` | Predetermined FX return: `ln(F(t0)/F(t0-30m))` using latest available USD/KRW observations. |
+| `kospi_return_latest` | `float64` | Latest backward-as-of KOSPI adjusted-close log return, available after the Korean close. |
+| `vix_level_lag1d` | `float64` | Latest VIX close whose 16:00 New York availability time precedes the anchor. |
+| `vix_change_lag1d` | `float64` | Point change in the latest available VIX close. |
+| `us_2y_yield_change_lag1d` | `float64` | Latest available daily change in the FRED U.S. 2-year Treasury yield. |
+| `us_10y_yield_change_lag1d` | `float64` | Latest available daily change in the FRED U.S. 10-year Treasury yield. |
 | `trade_ticks_available` | `bool` | True when non-empty full SKHY trade-tick input is available. |
 | `quote_ticks_available` | `bool` | True when non-empty full SKHY quote-tick input is available. |
 | `trade_count_0_1m` | `float64` | Number of valid trades in the half-open post-anchor window `[t0,t0+1m)`; post-event outcome. |

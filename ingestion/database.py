@@ -37,6 +37,11 @@ RAW_FILES: Final = {
     "usdkrw": Path("fx/USDKRW_5min.parquet"),
     "korea": Path("korea/000660_daily.parquet"),
 }
+MACRO_FILES: Final = {
+    "kospi": Path("macro/KOSPI_daily.parquet"),
+    "vix": Path("macro/VIX_daily.parquet"),
+    "us_treasury": Path("macro/US_TREASURY_daily.parquet"),
+}
 
 TICK_FILES: Final = {
     "trades": Path("us/SKHY_trades.parquet"),
@@ -91,6 +96,51 @@ def _load_korea(path: Path) -> pd.DataFrame:
     frame["korea_range"] = np.log(frame["high"] / frame["low"])
     frame["korea_log_volume"] = np.log1p(frame["volume"])
     return frame
+
+
+def _load_macro_controls(raw_dir: Path) -> dict[str, pd.DataFrame]:
+    paths = {name: raw_dir / relative for name, relative in MACRO_FILES.items()}
+    missing = [str(path) for path in paths.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "Required macro-control files are missing:\n- " + "\n- ".join(missing)
+        )
+
+    kospi = pd.read_parquet(paths["kospi"]).copy()
+    kospi["trading_date"] = pd.to_datetime(kospi["date"]).dt.date
+    kospi_close = pd.to_datetime(kospi["trading_date"].astype(str) + " 15:30:00")
+    kospi["availability_timestamp_utc"] = (
+        kospi_close.dt.tz_localize(SEOUL_TZ).dt.tz_convert(UTC_TZ)
+    )
+    kospi["kospi_return_latest"] = np.log(
+        kospi["adjusted_close"] / kospi["adjusted_close"].shift(1)
+    )
+
+    vix = pd.read_parquet(paths["vix"]).copy()
+    vix["trading_date"] = pd.to_datetime(vix["date"]).dt.date
+    vix_close = pd.to_datetime(vix["trading_date"].astype(str) + " 16:00:00")
+    vix["availability_timestamp_utc"] = (
+        vix_close.dt.tz_localize(NY_TZ).dt.tz_convert(UTC_TZ)
+    )
+    vix["vix_level_lag1d"] = vix["adjusted_close"]
+    vix["vix_change_lag1d"] = vix["adjusted_close"].diff()
+
+    treasury = pd.read_parquet(paths["us_treasury"]).copy()
+    treasury["trading_date"] = pd.to_datetime(treasury["date"]).dt.date
+    treasury_close = pd.to_datetime(
+        treasury["trading_date"].astype(str) + " 17:00:00"
+    )
+    treasury["availability_timestamp_utc"] = (
+        treasury_close.dt.tz_localize(NY_TZ).dt.tz_convert(UTC_TZ)
+    )
+    treasury["us_2y_yield_change_lag1d"] = treasury["us_2y_yield"].diff()
+    treasury["us_10y_yield_change_lag1d"] = treasury["us_10y_yield"].diff()
+
+    return {
+        "kospi": kospi.sort_values("availability_timestamp_utc").reset_index(drop=True),
+        "vix": vix.sort_values("availability_timestamp_utc").reset_index(drop=True),
+        "us_treasury": treasury.sort_values("availability_timestamp_utc").reset_index(drop=True),
+    }
 
 
 def _load_optional_events(path: Path, timestamp_column: str) -> pd.DataFrame:
@@ -365,6 +415,29 @@ def _latest_at_or_before(
     return None if candidates.empty else candidates.iloc[-1]
 
 
+def _latest_available_daily(
+    frame: pd.DataFrame, timestamp_utc: pd.Timestamp
+) -> pd.Series | None:
+    candidates = frame[frame["availability_timestamp_utc"] <= timestamp_utc]
+    return None if candidates.empty else candidates.iloc[-1]
+
+
+def _exact_pre_event_return(
+    group: pd.DataFrame | None,
+    anchor_bar: pd.Series | None,
+    anchor_timestamp: pd.Timestamp,
+) -> float:
+    """Return the exact five-minute price change ending at the anchor."""
+    if group is None or anchor_bar is None:
+        return np.nan
+    prior_bar = _exact_bar(
+        group, anchor_timestamp - pd.Timedelta(minutes=BAR_MINUTES)
+    )
+    if prior_bar is None:
+        return np.nan
+    return _safe_log_ratio(anchor_bar.get("open"), prior_bar.get("close"))
+
+
 def _previous_regular_close(
     groups: dict[date, pd.DataFrame], event_date: date
 ) -> pd.Series | None:
@@ -474,6 +547,7 @@ def _event_lookup(frame: pd.DataFrame) -> dict[tuple[date, str], pd.Series]:
 def build_granger_panel(
     bars: dict[str, pd.DataFrame],
     korea: pd.DataFrame,
+    macro: dict[str, pd.DataFrame],
     trades: pd.DataFrame,
     quotes: pd.DataFrame,
     tick_trades: pd.DataFrame,
@@ -604,6 +678,11 @@ def build_granger_panel(
                     anchor_type,
                 )
                 row[f"{name}_pre_event_return"] = feature["return"]
+                row[f"{name}_pre_event_return_5m"] = _exact_pre_event_return(
+                    groups[name].get(event_date),
+                    anchor_bars[name],
+                    scheduled_utc,
+                )
 
             fx_now = _latest_at_or_before(bars["usdkrw"], scheduled_utc)
             fx_pre = _latest_at_or_before(
@@ -612,6 +691,33 @@ def build_granger_panel(
             row["usdkrw_return_latest"] = _safe_log_ratio(
                 fx_now.get("close") if fx_now is not None else np.nan,
                 fx_pre.get("close") if fx_pre is not None else np.nan,
+            )
+
+            kospi_row = _latest_available_daily(macro["kospi"], scheduled_utc)
+            vix_row = _latest_available_daily(macro["vix"], scheduled_utc)
+            treasury_row = _latest_available_daily(
+                macro["us_treasury"], scheduled_utc
+            )
+            row["kospi_return_latest"] = (
+                kospi_row.get("kospi_return_latest")
+                if kospi_row is not None
+                else np.nan
+            )
+            row["vix_level_lag1d"] = (
+                vix_row.get("vix_level_lag1d") if vix_row is not None else np.nan
+            )
+            row["vix_change_lag1d"] = (
+                vix_row.get("vix_change_lag1d") if vix_row is not None else np.nan
+            )
+            row["us_2y_yield_change_lag1d"] = (
+                treasury_row.get("us_2y_yield_change_lag1d")
+                if treasury_row is not None
+                else np.nan
+            )
+            row["us_10y_yield_change_lag1d"] = (
+                treasury_row.get("us_10y_yield_change_lag1d")
+                if treasury_row is not None
+                else np.nan
             )
 
             row.update(
@@ -824,6 +930,7 @@ def build_processed_panels(
     paths = _required_paths(raw_dir)
     bars = {name: _load_bars(path) for name, path in paths.items() if name != "korea"}
     korea = _load_korea(paths["korea"])
+    macro = _load_macro_controls(raw_dir)
     trades = _load_optional_events(
         raw_dir / "us" / "SKHY_first_trades.parquet", "t_first_trade"
     )
@@ -840,6 +947,7 @@ def build_processed_panels(
     granger_panel = build_granger_panel(
         bars,
         korea,
+        macro,
         trades,
         quotes,
         tick_trades,

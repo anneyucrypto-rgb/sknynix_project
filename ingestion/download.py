@@ -35,12 +35,12 @@ CONTROL_BAR_DATASETS: Final = (
     ("C:USDKRW", RAW_DIR / "fx" / "USDKRW_5min.parquet", True),
 )
 COMMON_DAILY_CONTROLS: Final = (
-    ("^KS11", RAW_DIR / "macro" / "KOSPI_daily.parquet"),
-    ("^VIX", RAW_DIR / "macro" / "VIX_daily.parquet"),
+    ("^KS11", RAW_DIR / "korea" / "KOSPI_daily.parquet"),
+    ("^VIX", RAW_DIR / "us" / "VIX_daily.parquet"),
 )
 FRED_YIELD_SERIES: Final = ("DGS2", "DGS10")
 EVENT_ANCHORS: Final = (
-    ("premarket_0400", time(4, 0)),
+    ("premarket_dynamic", time(7, 0)),
     ("regular_0930", time(9, 30)),
 )
 
@@ -95,6 +95,72 @@ def load_secret(path: Path = SECRET_FILE) -> str:
             if name.strip() == "MASSIVE_API_KEY":
                 return value.strip().strip("\"'")
     raise RuntimeError(f"MASSIVE_API_KEY is missing from the environment and {path}")
+
+
+def existing_parquet_covers(
+    path: Path,
+    date_column: str,
+    start: date,
+    end: date,
+) -> tuple[bool, int, date | None, date | None]:
+    """Check whether a nonempty Parquet file already spans a requested window.
+
+    A three-day boundary allowance handles weekends and most exchange holidays.
+    The check reads only the date column, so even full tick files are cheap to
+    inspect. Invalid or empty files are never accepted.
+    """
+    if not path.is_file():
+        return False, 0, None, None
+    try:
+        values = pd.read_parquet(path, columns=[date_column])[date_column]
+    except Exception:
+        # Any unreadable/corrupt file is treated as missing and downloaded again.
+        return False, 0, None, None
+    if values.empty:
+        return False, 0, None, None
+    timestamps = pd.to_datetime(values, errors="coerce", utc=True).dropna()
+    if timestamps.empty:
+        return False, 0, None, None
+    first = timestamps.min().date()
+    last = timestamps.max().date()
+    start_boundary = min(end, start + timedelta(days=3))
+    end_boundary = max(start, end - timedelta(days=3))
+    return first <= start_boundary and last >= end_boundary, len(values), first, last
+
+
+def print_existing(
+    label: str,
+    target: Path,
+    rows: int,
+    first: date | None,
+    last: date | None,
+) -> None:
+    """Report that a network request was skipped because data already exists."""
+    print(
+        f"SKIP {label:7} {rows:>10,} existing rows "
+        f"({first} through {last}) -> {target}"
+    )
+
+
+def print_download_start(
+    label: str, target: Path, start: date, end: date, description: str
+) -> None:
+    """Announce a file download before making its network request."""
+    print(
+        f"[DOWNLOAD   0%] {label:7} {description} "
+        f"({start} through {end}) -> {target}",
+        flush=True,
+    )
+
+
+def print_download_complete(
+    label: str, target: Path, rows: int, description: str
+) -> None:
+    """Report completion for one Parquet destination."""
+    print(
+        f"[DOWNLOAD 100%] {label:7} {rows:>10,} {description} -> {target}",
+        flush=True,
+    )
 
 
 def download_korean_daily(
@@ -311,9 +377,12 @@ def _download_first_events(
                 write_parquet(_empty_event_frame(kind), destination)
                 return 0, str(exc)
             raise
-        if index % 25 == 0:
+        if index % 25 == 0 or index == len(schedule):
+            percent = 100.0 * index / len(schedule) if schedule else 100.0
             print(
-                f"    {ticker} {kind}: checked {index:,}/{len(schedule):,} events"
+                f"[DOWNLOAD {percent:5.1f}%] {ticker:7} {kind}: checked "
+                f"{index:,}/{len(schedule):,} events -> {destination}",
+                flush=True,
             )
 
     frame = pd.DataFrame.from_records(rows) if rows else _empty_event_frame(kind)
@@ -364,8 +433,8 @@ def parse_args() -> argparse.Namespace:
         "--full-ticks",
         action="store_true",
         help=(
-            "Also stream all selected U.S. trades/quotes for post-anchor "
-            "microstructure windows."
+            "Also stream all selected U.S. trades/quotes. Full quotes are "
+            "required to select the dynamic premarket anchor without look-ahead."
         ),
     )
     return parser.parse_args()
@@ -395,7 +464,14 @@ def main() -> int:
             else "SPY, SOXX, QQQ, USD/KRW, KOSPI, VIX, U.S. 2Y/10Y"
         )
     )
-    client = MassiveClient(load_secret())
+    client: MassiveClient | None = None
+
+    def get_client() -> MassiveClient:
+        nonlocal client
+        if client is None:
+            client = MassiveClient(load_secret())
+        return client
+
     failures: list[str] = []
     pair_bars: dict[str, pd.DataFrame] = {}
 
@@ -414,8 +490,17 @@ def main() -> int:
     ]
     for ticker, target, include_volume in bar_datasets:
         label = ticker.removeprefix("C:")
+        covered, rows, first, last = existing_parquet_covers(
+            target, "timestamp", start, end
+        )
+        if covered:
+            print_existing(label, target, rows, first, last)
+            if ticker in selected_tickers:
+                pair_bars[ticker] = pd.read_parquet(target)
+            continue
         try:
-            frame = client.get_aggregates(
+            print_download_start(label, target, start, end, "five-minute bars")
+            frame = get_client().get_aggregates(
                 ticker,
                 start.isoformat(),
                 end.isoformat(),
@@ -428,7 +513,9 @@ def main() -> int:
             write_parquet(frame, target)
             if ticker in selected_tickers:
                 pair_bars[ticker] = frame
-            print(f"OK  {label:7} {len(frame):>10,} five-minute rows -> {target}")
+            print_download_complete(
+                label, target, len(frame), "five-minute rows"
+            )
         except Exception as exc:
             failures.append(f"{label}: {exc}")
             print(f"ERR {label:7} {exc}", file=sys.stderr)
@@ -436,38 +523,68 @@ def main() -> int:
     if not args.skip_controls:
         macro_start = start - timedelta(days=10)
         for ticker, target in COMMON_DAILY_CONTROLS:
+            covered, rows, first, last = existing_parquet_covers(
+                target, "date", macro_start, end
+            )
+            if covered:
+                print_existing(ticker, target, rows, first, last)
+                continue
             try:
+                print_download_start(
+                    ticker, target, macro_start, end, "daily control"
+                )
                 count = download_korean_daily(ticker, macro_start, end, target)
-                print(
-                    f"OK  {ticker:7} {count:>10,} daily control rows -> {target}"
+                print_download_complete(
+                    ticker, target, count, "daily control rows"
                 )
             except Exception as exc:
                 failures.append(f"{ticker}: {exc}")
                 print(f"ERR {ticker:7} {exc}", file=sys.stderr)
 
-        treasury_target = RAW_DIR / "macro" / "US_TREASURY_daily.parquet"
-        try:
-            count = download_us_treasury_yields(
-                macro_start, end, treasury_target
-            )
-            print(
-                f"OK  FRED    {count:>10,} U.S. yield rows -> {treasury_target}"
-            )
-        except Exception as exc:
-            failures.append(f"FRED yields: {exc}")
-            print(f"ERR FRED yields  {exc}", file=sys.stderr)
+        treasury_target = RAW_DIR / "us" / "US_TREASURY_daily.parquet"
+        covered, rows, first, last = existing_parquet_covers(
+            treasury_target, "date", macro_start, end
+        )
+        if covered:
+            print_existing("FRED", treasury_target, rows, first, last)
+        else:
+            try:
+                print_download_start(
+                    "FRED", treasury_target, macro_start, end, "U.S. yields"
+                )
+                count = download_us_treasury_yields(
+                    macro_start, end, treasury_target
+                )
+                print_download_complete(
+                    "FRED", treasury_target, count, "U.S. yield rows"
+                )
+            except Exception as exc:
+                failures.append(f"FRED yields: {exc}")
+                print(f"ERR FRED yields  {exc}", file=sys.stderr)
 
     for pair in selected_pairs:
         korea_target = (
             RAW_DIR / "korea" / f"{pair.korea_file_stem}_daily.parquet"
         )
+        covered, rows, first, last = existing_parquet_covers(
+            korea_target, "date", start, end
+        )
+        if covered:
+            print_existing(pair.korea_file_stem, korea_target, rows, first, last)
+            continue
         try:
+            print_download_start(
+                pair.korea_file_stem,
+                korea_target,
+                start,
+                end,
+                "Korean daily bars",
+            )
             count = download_korean_daily(
                 pair.korea_ticker, start, end, korea_target
             )
-            print(
-                f"OK  {pair.korea_file_stem:7} {count:>10,} daily rows -> "
-                f"{korea_target}"
+            print_download_complete(
+                pair.korea_file_stem, korea_target, count, "daily rows"
             )
         except Exception as exc:
             failures.append(f"{pair.korea_ticker}: {exc}")
@@ -481,68 +598,104 @@ def main() -> int:
         schedule = _event_schedule(us_bars)
         if not args.skip_trades:
             target = RAW_DIR / "us" / f"{us_ticker}_first_trades.parquet"
-            count, warning = _download_first_events(
-                client,
-                schedule,
-                ticker=us_ticker,
-                kind="trade",
-                destination=target,
+            covered, rows, first, last = existing_parquet_covers(
+                target, "event_date_ny", start, end
             )
-            print(
-                f"OK  {us_ticker:7} {count:>10,} first-trade rows -> {target}"
-            )
-            if warning:
-                print(f"WARN {us_ticker} trades   {warning}", file=sys.stderr)
+            if covered:
+                print_existing(us_ticker, target, rows, first, last)
+            else:
+                print_download_start(
+                    us_ticker, target, start, end, "first trades"
+                )
+                count, warning = _download_first_events(
+                    get_client(),
+                    schedule,
+                    ticker=us_ticker,
+                    kind="trade",
+                    destination=target,
+                )
+                print_download_complete(
+                    us_ticker, target, count, "first-trade rows"
+                )
+                if warning:
+                    print(f"WARN {us_ticker} trades   {warning}", file=sys.stderr)
         if not args.skip_quotes:
             target = RAW_DIR / "us" / f"{us_ticker}_first_quotes.parquet"
-            count, warning = _download_first_events(
-                client,
-                schedule,
-                ticker=us_ticker,
-                kind="quote",
-                destination=target,
+            covered, rows, first, last = existing_parquet_covers(
+                target, "event_date_ny", start, end
             )
-            print(
-                f"OK  {us_ticker:7} {count:>10,} first-quote rows -> {target}"
-            )
-            if warning:
-                print(f"WARN {us_ticker} quotes   {warning}", file=sys.stderr)
+            if covered:
+                print_existing(us_ticker, target, rows, first, last)
+            else:
+                print_download_start(
+                    us_ticker, target, start, end, "first quotes"
+                )
+                count, warning = _download_first_events(
+                    get_client(),
+                    schedule,
+                    ticker=us_ticker,
+                    kind="quote",
+                    destination=target,
+                )
+                print_download_complete(
+                    us_ticker, target, count, "first-quote rows"
+                )
+                if warning:
+                    print(f"WARN {us_ticker} quotes   {warning}", file=sys.stderr)
 
         if args.full_ticks and not args.skip_trades:
             target = RAW_DIR / "us" / f"{us_ticker}_trades.parquet"
-            try:
-                count = client.download_trades_parquet(
-                    us_ticker, start.isoformat(), end.isoformat(), target
-                )
-                print(
-                    f"OK  {us_ticker:7} {count:>10,} full trade rows -> {target}"
-                )
-            except MassiveAPIError as exc:
-                if _is_entitlement_error(exc):
-                    print(
-                        f"WARN {us_ticker} full trades   {exc}", file=sys.stderr
+            covered, rows, first, last = existing_parquet_covers(
+                target, "sip_datetime", start, end
+            )
+            if covered:
+                print_existing(us_ticker, target, rows, first, last)
+            else:
+                try:
+                    print_download_start(
+                        us_ticker, target, start, end, "full trades"
                     )
-                else:
-                    failures.append(f"{us_ticker} full trades: {exc}")
-                    print(f"ERR {us_ticker} full trades   {exc}", file=sys.stderr)
+                    count = get_client().download_trades_parquet(
+                        us_ticker, start.isoformat(), end.isoformat(), target
+                    )
+                    print_download_complete(
+                        us_ticker, target, count, "full trade rows"
+                    )
+                except MassiveAPIError as exc:
+                    if _is_entitlement_error(exc):
+                        print(
+                            f"WARN {us_ticker} full trades   {exc}", file=sys.stderr
+                        )
+                    else:
+                        failures.append(f"{us_ticker} full trades: {exc}")
+                        print(f"ERR {us_ticker} full trades   {exc}", file=sys.stderr)
 
         if args.full_ticks and not args.skip_quotes:
             target = RAW_DIR / "us" / f"{us_ticker}_quotes.parquet"
-            try:
-                count = client.download_quotes_parquet(
-                    us_ticker, start.isoformat(), end.isoformat(), target
-                )
-                print(
-                    f"OK  {us_ticker:7} {count:>10,} full quote rows -> {target}"
-                )
-            except MassiveAPIError as exc:
-                if _is_entitlement_error(exc):
-                    print(
-                        f"WARN {us_ticker} full quotes   {exc}", file=sys.stderr
+            covered, rows, first, last = existing_parquet_covers(
+                target, "sip_datetime", start, end
+            )
+            if covered:
+                print_existing(us_ticker, target, rows, first, last)
+            else:
+                try:
+                    print_download_start(
+                        us_ticker, target, start, end, "full quotes"
                     )
-                else:
-                    failures.append(f"{us_ticker} full quotes: {exc}")
-                    print(f"ERR {us_ticker} full quotes   {exc}", file=sys.stderr)
+                    count = get_client().download_quotes_parquet(
+                        us_ticker, start.isoformat(), end.isoformat(), target
+                    )
+                    print_download_complete(
+                        us_ticker, target, count, "full quote rows"
+                    )
+                except MassiveAPIError as exc:
+                    if _is_entitlement_error(exc):
+                        print(
+                            f"WARN {us_ticker} full quotes   {exc}", file=sys.stderr
+                        )
+                    else:
+                        failures.append(f"{us_ticker} full quotes: {exc}")
+                        print(f"ERR {us_ticker} full quotes   {exc}", file=sys.stderr)
 
     if failures:
         print("\nCompleted with failures:", file=sys.stderr)

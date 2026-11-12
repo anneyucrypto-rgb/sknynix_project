@@ -68,6 +68,46 @@ TRADE_COLUMNS = [
     "tape",
 ]
 
+# Massive can omit nullable fields on one page and populate them on the next.
+# Without an explicit Arrow schema, an all-null page is inferred as ``null`` and
+# a later numeric/string page cannot be appended to the same Parquet writer.
+QUOTE_SCHEMA = pa.schema(
+    [
+        pa.field("ticker", pa.string(), nullable=False),
+        pa.field("sip_timestamp", pa.int64()),
+        pa.field("sip_datetime", pa.timestamp("ns", tz="UTC")),
+        pa.field("participant_timestamp", pa.int64()),
+        pa.field("participant_datetime", pa.timestamp("ns", tz="UTC")),
+        pa.field("trf_timestamp", pa.int64()),
+        pa.field("sequence_number", pa.int64()),
+        pa.field("bid_price", pa.float64()),
+        pa.field("bid_size", pa.float64()),
+        pa.field("bid_exchange", pa.int64()),
+        pa.field("ask_price", pa.float64()),
+        pa.field("ask_size", pa.float64()),
+        pa.field("ask_exchange", pa.int64()),
+        pa.field("conditions", pa.string()),
+        pa.field("indicators", pa.string()),
+        pa.field("tape", pa.int64()),
+    ]
+)
+TRADE_SCHEMA = pa.schema(
+    [
+        pa.field("ticker", pa.string(), nullable=False),
+        pa.field("sip_timestamp", pa.int64()),
+        pa.field("sip_datetime", pa.timestamp("ns", tz="UTC")),
+        pa.field("participant_timestamp", pa.int64()),
+        pa.field("participant_datetime", pa.timestamp("ns", tz="UTC")),
+        pa.field("trf_timestamp", pa.int64()),
+        pa.field("sequence_number", pa.int64()),
+        pa.field("price", pa.float64()),
+        pa.field("size", pa.float64()),
+        pa.field("exchange", pa.int64()),
+        pa.field("conditions", pa.string()),
+        pa.field("tape", pa.int64()),
+    ]
+)
+
 
 class MassiveAPIError(RuntimeError):
     """Raised when Massive returns an unsuccessful response."""
@@ -265,7 +305,9 @@ class MassiveClient:
                 if not page:
                     continue
                 frame = _normalize_quotes(page, ticker)
-                table = pa.Table.from_pandas(frame, preserve_index=False)
+                table = pa.Table.from_pandas(
+                    frame, schema=QUOTE_SCHEMA, preserve_index=False
+                )
                 if writer is None:
                     writer = pq.ParquetWriter(
                         temporary,
@@ -286,9 +328,8 @@ class MassiveClient:
                 writer.close()
 
         if total == 0:
-            empty = _empty_quote_frame()
             pq.write_table(
-                pa.Table.from_pandas(empty, preserve_index=False),
+                pa.Table.from_pylist([], schema=QUOTE_SCHEMA),
                 temporary,
                 compression="zstd",
             )
@@ -320,7 +361,9 @@ class MassiveClient:
                 if not page:
                     continue
                 frame = _normalize_trades(page, ticker)
-                table = pa.Table.from_pandas(frame, preserve_index=False)
+                table = pa.Table.from_pandas(
+                    frame, schema=TRADE_SCHEMA, preserve_index=False
+                )
                 if writer is None:
                     writer = pq.ParquetWriter(
                         temporary,
@@ -342,7 +385,7 @@ class MassiveClient:
 
         if total == 0:
             pq.write_table(
-                pa.Table.from_pandas(_empty_trade_frame(), preserve_index=False),
+                pa.Table.from_pylist([], schema=TRADE_SCHEMA),
                 temporary,
                 compression="zstd",
             )

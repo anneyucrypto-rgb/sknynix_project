@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Final
 from zoneinfo import ZoneInfo
@@ -19,14 +19,38 @@ DEFAULT_ADS_SHARES_PER_ADS: Final = 0.1
 NY_TZ: Final = ZoneInfo("America/New_York")
 SEOUL_TZ: Final = ZoneInfo("Asia/Seoul")
 UTC_TZ: Final = ZoneInfo("UTC")
-HORIZONS: Final = (5, 10, 30, 60, 90, 120)
+HORIZONS: Final = (5, 10, 15, 30, 45, 60, 100, 120)
 MICROSTRUCTURE_WINDOWS: Final = (1, 5, 10, 30, 60)
 BAR_MINUTES: Final = 5
 PRE_EVENT_WINDOW_MINUTES: Final = 30
 PRE_EVENT_BAR_COUNT: Final = PRE_EVENT_WINDOW_MINUTES // BAR_MINUTES
 EVENT_ANCHORS: Final = (
-    ("premarket_0400", time(4, 0)),
+    ("premarket_dynamic", time(7, 0)),
     ("regular_0930", time(9, 30)),
+)
+PREMARKET_DYNAMIC_END: Final = time(9, 25)
+DEFAULT_DYNAMIC_MAX_SPREAD_BPS: Final = 100.0
+DEFAULT_DYNAMIC_MIN_DEPTH: Final = 100.0
+DEFAULT_DYNAMIC_MAX_QUOTE_AGE_SECONDS: Final = 60.0
+DEFAULT_DYNAMIC_VOLUME_LOOKBACK_MINUTES: Final = 5
+# Yahoo enforces a strict rolling 60-day boundary that also counts the
+# exclusive end timestamp; 58 calendar days avoids timezone/boundary rejection.
+YAHOO_INTRADAY_MAX_DAYS: Final = 58
+
+US_CONTROL_BARS: Final = (
+    ("SPY", Path("us/SPY_5min.parquet")),
+    ("SOXX", Path("us/SOXX_5min.parquet")),
+    ("QQQ", Path("us/QQQ_5min.parquet")),
+    ("C:USDKRW", Path("fx/USDKRW_5min.parquet")),
+)
+KOREAN_5MIN_CONTROLS: Final = (
+    ("KOSPI", "^KS11", Path("korea/KOSPI_5min.parquet"), False, "KOSPI"),
+    ("KOSPI_200", "^KS200", Path("korea/KOSPI200_5min.parquet"), False, "KOSPI 200"),
+    ("KOSDAQ_150", "229200.KS", Path("korea/KOSDAQ150_5min.parquet"), True, "KOSDAQ 150"),
+    ("KRX_300", "292150.KS", Path("korea/KRX300_5min.parquet"), True, "KRX 300"),
+    ("KOSDAQ", "^KQ11", Path("korea/KOSDAQ_5min.parquet"), False, "KOSDAQ Composite"),
+    ("KOREA_SEMICONDUCTOR", "091160.KS", Path("korea/KOREA_SEMICONDUCTOR_5min.parquet"), True, "KRX Semiconductor"),
+    ("KOREA_SEMICONDUCTOR_TOP10", "396500.KS", Path("korea/KOREA_SEMICONDUCTOR_TOP10_5min.parquet"), True, "Korean semiconductor leaders"),
 )
 
 RAW_FILES: Final = {
@@ -38,15 +62,190 @@ RAW_FILES: Final = {
     "korea": Path("korea/000660_daily.parquet"),
 }
 MACRO_FILES: Final = {
-    "kospi": Path("macro/KOSPI_daily.parquet"),
-    "vix": Path("macro/VIX_daily.parquet"),
-    "us_treasury": Path("macro/US_TREASURY_daily.parquet"),
+    "kospi": Path("korea/KOSPI_daily.parquet"),
+    "vix": Path("us/VIX_daily.parquet"),
+    "us_treasury": Path("us/US_TREASURY_daily.parquet"),
+}
+KOREAN_INTRADAY_MACRO_FILES: Final = {
+    "kospi_5m": Path("korea/KOSPI_5min.parquet"),
+    "kospi200_5m": Path("korea/KOSPI200_5min.parquet"),
+    "kosdaq150_5m": Path("korea/KOSDAQ150_5min.parquet"),
+    "krx300_5m": Path("korea/KRX300_5min.parquet"),
+    "kosdaq_5m": Path("korea/KOSDAQ_5min.parquet"),
+    "korea_semiconductor_5m": Path("korea/KOREA_SEMICONDUCTOR_5min.parquet"),
+    "korea_semiconductor_top10_5m": Path("korea/KOREA_SEMICONDUCTOR_TOP10_5min.parquet"),
 }
 
 TICK_FILES: Final = {
     "trades": Path("us/SKHY_trades.parquet"),
     "quotes": Path("us/SKHY_quotes.parquet"),
 }
+
+
+def _raw_skhy_date_range(raw_dir: Path) -> tuple[date, date]:
+    """Infer an inclusive control-download range from raw SKHY bars."""
+    path = raw_dir / "us" / "SKHY_5min.parquet"
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Cannot infer control dates because {path} does not exist; "
+            "provide --start-date and --end-date."
+        )
+    timestamps = pd.to_datetime(
+        pd.read_parquet(path, columns=["timestamp"])["timestamp"], utc=True
+    ).dt.tz_convert(NY_TZ)
+    return timestamps.dt.date.min(), timestamps.dt.date.max()
+
+
+def _download_yahoo_5minute_control(
+    symbol: str,
+    start: date,
+    end: date,
+    destination: Path,
+    *,
+    instrument_name: str,
+    requested_index: str,
+    is_proxy: bool,
+) -> int:
+    """Download a normalized five-minute Korean index or labeled proxy."""
+    import yfinance as yf
+
+    earliest_supported = end - timedelta(days=YAHOO_INTRADAY_MAX_DAYS)
+    effective_start = max(start, earliest_supported)
+    if effective_start > start:
+        print(
+            f"WARN {instrument_name}: Yahoo five-minute retention begins at "
+            f"{effective_start}; requested start was {start}."
+        )
+    raw = yf.download(
+        symbol,
+        start=effective_start.isoformat(),
+        end=(end + timedelta(days=1)).isoformat(),
+        interval="5m",
+        auto_adjust=False,
+        actions=False,
+        prepost=False,
+        progress=False,
+        threads=False,
+    )
+    if raw.empty:
+        kind = "proxy" if is_proxy else "index"
+        raise RuntimeError(
+            f"Yahoo returned no five-minute rows for {instrument_name} "
+            f"({symbol}, {kind})"
+        )
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = raw.columns.get_level_values(0)
+    frame = raw.reset_index().rename(
+        columns={
+            "Datetime": "timestamp",
+            "Date": "timestamp",
+            "Open": "open",
+            "High": "high",
+            "Low": "low",
+            "Close": "close",
+            "Volume": "volume",
+        }
+    )
+    frame.columns = [str(column).lower().replace(" ", "_") for column in frame]
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
+    frame.insert(0, "ticker", symbol)
+    frame["vwap"] = np.nan
+    frame["transactions"] = pd.Series(pd.NA, index=frame.index, dtype="Int64")
+    frame["instrument_name"] = instrument_name
+    frame["requested_index"] = requested_index
+    frame["is_proxy"] = is_proxy
+    columns = [
+        "ticker",
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "vwap",
+        "transactions",
+        "instrument_name",
+        "requested_index",
+        "is_proxy",
+    ]
+    try:
+        from massive_client import write_parquet
+    except ImportError:
+        from ingestion.massive_client import write_parquet
+    write_parquet(frame[columns], destination)
+    return len(frame)
+
+
+def download_all_controls(raw_dir: Path, start: date, end: date) -> dict[str, int]:
+    """Download U.S., Korean, FX, macro, and signal control datasets."""
+    try:
+        from download import (
+            download_korean_daily,
+            download_us_treasury_yields,
+            load_secret,
+        )
+        from massive_client import MassiveClient, write_parquet
+    except ImportError:
+        from ingestion.download import (
+            download_korean_daily,
+            download_us_treasury_yields,
+            load_secret,
+        )
+        from ingestion.massive_client import MassiveClient, write_parquet
+
+    if start > end:
+        raise ValueError("control start date must not be later than end date")
+    counts: dict[str, int] = {}
+    client = MassiveClient(load_secret())
+    for ticker, relative_path in US_CONTROL_BARS:
+        destination = raw_dir / relative_path
+        frame = client.get_aggregates(
+            ticker,
+            start.isoformat(),
+            end.isoformat(),
+            multiplier=5,
+            timespan="minute",
+            include_volume=True,
+        )
+        if frame.empty:
+            raise RuntimeError(f"Massive returned no five-minute rows for {ticker}")
+        write_parquet(frame, destination)
+        counts[str(destination)] = len(frame)
+        print(f"OK  {ticker:28} {len(frame):>8,} five-minute rows -> {destination}")
+
+    for name, symbol, relative_path, is_proxy, requested_index in KOREAN_5MIN_CONTROLS:
+        destination = raw_dir / relative_path
+        count = _download_yahoo_5minute_control(
+            symbol,
+            start,
+            end,
+            destination,
+            instrument_name=name,
+            requested_index=requested_index,
+            is_proxy=is_proxy,
+        )
+        counts[str(destination)] = count
+        proxy_label = " proxy" if is_proxy else ""
+        print(f"OK  {name:28} {count:>8,} five-minute rows{proxy_label} -> {destination}")
+
+    daily_controls = (
+        ("000660.KS", Path("korea/000660_daily.parquet")),
+        ("^KS11", Path("korea/KOSPI_daily.parquet")),
+        ("^KQ11", Path("korea/KOSDAQ_daily.parquet")),
+        ("^VIX", Path("us/VIX_daily.parquet")),
+    )
+    daily_start = start - timedelta(days=10)
+    for symbol, relative_path in daily_controls:
+        destination = raw_dir / relative_path
+        count = download_korean_daily(symbol, daily_start, end, destination)
+        counts[str(destination)] = count
+        print(f"OK  {symbol:28} {count:>8,} daily rows -> {destination}")
+
+    treasury_path = raw_dir / "us" / "US_TREASURY_daily.parquet"
+    count = download_us_treasury_yields(daily_start, end, treasury_path)
+    counts[str(treasury_path)] = count
+    print(f"OK  {'US 2Y/10Y Treasury':28} {count:>8,} daily rows -> {treasury_path}")
+    return counts
 
 
 def _safe_log_ratio(numerator: Any, denominator: Any) -> float:
@@ -136,11 +335,15 @@ def _load_macro_controls(raw_dir: Path) -> dict[str, pd.DataFrame]:
     treasury["us_2y_yield_change_lag1d"] = treasury["us_2y_yield"].diff()
     treasury["us_10y_yield_change_lag1d"] = treasury["us_10y_yield"].diff()
 
-    return {
+    controls = {
         "kospi": kospi.sort_values("availability_timestamp_utc").reset_index(drop=True),
         "vix": vix.sort_values("availability_timestamp_utc").reset_index(drop=True),
         "us_treasury": treasury.sort_values("availability_timestamp_utc").reset_index(drop=True),
     }
+    for name, relative_path in KOREAN_INTRADAY_MACRO_FILES.items():
+        path = raw_dir / relative_path
+        controls[name] = _load_bars(path) if path.is_file() else pd.DataFrame()
+    return controls
 
 
 def _load_optional_events(path: Path, timestamp_column: str) -> pd.DataFrame:
@@ -422,6 +625,80 @@ def _latest_available_daily(
     return None if candidates.empty else candidates.iloc[-1]
 
 
+def _select_dynamic_premarket_anchor(
+    bars: pd.DataFrame | None,
+    quotes: pd.DataFrame | None,
+    *,
+    quotes_available: bool,
+    max_spread_bps: float,
+    min_depth: float,
+    max_quote_age_seconds: float,
+    volume_lookback_minutes: int,
+) -> tuple[dict[str, Any] | None, str]:
+    """Select the earliest eligible five-minute decision timestamp.
+
+    Candidate timestamps are SKHY five-minute bar starts from 07:00 through
+    09:20 New York time. Every filter uses only quote state and completed bar
+    volume observable at that timestamp; no return or future price is used.
+    """
+    if not quotes_available:
+        return None, "full_quote_ticks_unavailable"
+    if bars is None or bars.empty:
+        return None, "premarket_bars_unavailable"
+    if quotes is None or quotes.empty:
+        return None, "no_premarket_quotes"
+
+    candidates = bars[
+        (bars["event_time_ny"] >= time(7, 0))
+        & (bars["event_time_ny"] < PREMARKET_DYNAMIC_END)
+    ].sort_values("timestamp_utc")
+    if candidates.empty:
+        return None, "no_candidate_timestamps"
+
+    quote_state = quotes.sort_values("timestamp_utc")
+    for candidate_number, (_, candidate) in enumerate(candidates.iterrows(), start=1):
+        timestamp = candidate["timestamp_utc"]
+        observable_quotes = quote_state[quote_state["timestamp_utc"] <= timestamp]
+        if observable_quotes.empty:
+            continue
+        quote = observable_quotes.iloc[-1]
+        bid = float(quote["bid_price"])
+        ask = float(quote["ask_price"])
+        if bid <= 0 or ask <= bid:
+            continue
+        midpoint = (bid + ask) / 2.0
+        spread_bps = 10_000.0 * (ask - bid) / midpoint
+        depth = float(quote["bid_size"] + quote["ask_size"])
+        quote_age_seconds = float(
+            (timestamp - quote["timestamp_utc"]).total_seconds()
+        )
+        volume_window = bars[
+            (bars["timestamp_utc"] >= timestamp - pd.Timedelta(minutes=volume_lookback_minutes))
+            & (bars["timestamp_utc"] < timestamp)
+        ]
+        trailing_volume = float(volume_window["volume"].sum())
+        if (
+            spread_bps <= max_spread_bps
+            and depth >= min_depth
+            and quote_age_seconds <= max_quote_age_seconds
+            and trailing_volume > 0
+        ):
+            return {
+                "timestamp_utc": timestamp,
+                "quote_timestamp_utc": quote["timestamp_utc"],
+                "bid_price": bid,
+                "ask_price": ask,
+                "bid_size": float(quote["bid_size"]),
+                "ask_size": float(quote["ask_size"]),
+                "spread_bps": spread_bps,
+                "depth": depth,
+                "quote_age_seconds": quote_age_seconds,
+                "trailing_volume": trailing_volume,
+                "candidate_number": candidate_number,
+            }, "eligible"
+    return None, "no_candidate_passed_liquidity_filters"
+
+
 def _exact_pre_event_return(
     group: pd.DataFrame | None,
     anchor_bar: pd.Series | None,
@@ -475,10 +752,8 @@ def _pre_event_features(
         & (group["timestamp_utc"] < anchor_timestamp)
     ].sort_values("timestamp_utc")
 
-    if anchor_type == "regular_0930" and not window.empty:
+    if anchor_type in {"premarket_dynamic", "regular_0930"} and not window.empty:
         pre_return = _safe_log_ratio(anchor_bar.get("open"), window.iloc[0].get("open"))
-    elif anchor_type == "premarket_0400" and previous_close is not None:
-        pre_return = _safe_log_ratio(anchor_bar.get("open"), previous_close.get("close"))
     else:
         pre_return = np.nan
 
@@ -555,6 +830,10 @@ def build_granger_panel(
     *,
     tick_trades_available: bool,
     tick_quotes_available: bool,
+    dynamic_max_spread_bps: float = DEFAULT_DYNAMIC_MAX_SPREAD_BPS,
+    dynamic_min_depth: float = DEFAULT_DYNAMIC_MIN_DEPTH,
+    dynamic_max_quote_age_seconds: float = DEFAULT_DYNAMIC_MAX_QUOTE_AGE_SECONDS,
+    dynamic_volume_lookback_minutes: int = DEFAULT_DYNAMIC_VOLUME_LOOKBACK_MINUTES,
 ) -> pd.DataFrame:
     """Create one wide feature row per U.S. event date and anchor."""
     groups = {name: _date_groups(frame) for name, frame in bars.items() if name != "usdkrw"}
@@ -573,14 +852,62 @@ def build_granger_panel(
         for anchor_type, anchor_time in EVENT_ANCHORS:
             scheduled_local = datetime.combine(event_date, anchor_time, NY_TZ)
             scheduled_utc = pd.Timestamp(scheduled_local.astimezone(UTC_TZ))
+            dynamic_selection: dict[str, Any] | None = None
+            if anchor_type == "premarket_dynamic":
+                dynamic_selection, unavailable_reason = _select_dynamic_premarket_anchor(
+                    skhy_groups.get(event_date),
+                    tick_quote_groups.get(event_date),
+                    quotes_available=tick_quotes_available,
+                    max_spread_bps=dynamic_max_spread_bps,
+                    min_depth=dynamic_min_depth,
+                    max_quote_age_seconds=dynamic_max_quote_age_seconds,
+                    volume_lookback_minutes=dynamic_volume_lookback_minutes,
+                )
+                if dynamic_selection is None:
+                    rows.append(
+                        {
+                            "event_date_ny": event_date,
+                            "anchor_type": anchor_type,
+                            "timestamp_utc": pd.NaT,
+                            "research_reference_timestamp_utc": pd.NaT,
+                            "anchor_available": False,
+                            "anchor_unavailable_reason": unavailable_reason,
+                            "dynamic_max_spread_bps": dynamic_max_spread_bps,
+                            "dynamic_min_depth": dynamic_min_depth,
+                            "dynamic_max_quote_age_seconds": dynamic_max_quote_age_seconds,
+                            "dynamic_volume_lookback_minutes": dynamic_volume_lookback_minutes,
+                            "t_first_minute_bar": pd.NaT,
+                            "t_first_trade": pd.NaT,
+                            "t_first_quote": pd.NaT,
+                            "exact_minute_anchor": False,
+                            "iso_day_of_week": event_date.isoweekday(),
+                        }
+                    )
+                    continue
+                scheduled_utc = dynamic_selection["timestamp_utc"]
             key = (event_date, anchor_type)
 
             anchor_bars = {
-                name: _first_bar(groups[name].get(event_date), scheduled_utc)
+                name: _exact_bar(groups[name].get(event_date), scheduled_utc)
                 for name in ("skhy", "spy", "soxx", "qqq")
             }
             skhy_anchor = anchor_bars["skhy"]
             if skhy_anchor is None:
+                rows.append(
+                    {
+                        "event_date_ny": event_date,
+                        "anchor_type": anchor_type,
+                        "timestamp_utc": scheduled_utc,
+                        "research_reference_timestamp_utc": scheduled_utc,
+                        "anchor_available": False,
+                        "anchor_unavailable_reason": "exact_reference_bar_unavailable",
+                        "t_first_minute_bar": pd.NaT,
+                        "t_first_trade": pd.NaT,
+                        "t_first_quote": pd.NaT,
+                        "exact_minute_anchor": False,
+                        "iso_day_of_week": event_date.isoweekday(),
+                    }
+                )
                 continue
 
             previous_closes = {
@@ -598,6 +925,9 @@ def build_granger_panel(
                 "event_date_ny": event_date,
                 "anchor_type": anchor_type,
                 "timestamp_utc": scheduled_utc,
+                "research_reference_timestamp_utc": scheduled_utc,
+                "anchor_available": True,
+                "anchor_unavailable_reason": None,
                 "t_first_minute_bar": skhy_anchor["timestamp_utc"],
                 "t_first_trade": trade_row.get("t_first_trade") if trade_row is not None else pd.NaT,
                 "t_first_quote": quote_row.get("t_first_quote") if quote_row is not None else pd.NaT,
@@ -619,6 +949,25 @@ def build_granger_panel(
                 "exact_minute_anchor": skhy_anchor["timestamp_utc"] == scheduled_utc,
                 "iso_day_of_week": event_date.isoweekday(),
             }
+            if dynamic_selection is not None:
+                row.update(
+                    {
+                        "dynamic_quote_timestamp_utc": dynamic_selection["quote_timestamp_utc"],
+                        "dynamic_bid_price": dynamic_selection["bid_price"],
+                        "dynamic_ask_price": dynamic_selection["ask_price"],
+                        "dynamic_bid_size": dynamic_selection["bid_size"],
+                        "dynamic_ask_size": dynamic_selection["ask_size"],
+                        "dynamic_spread_bps": dynamic_selection["spread_bps"],
+                        "dynamic_depth": dynamic_selection["depth"],
+                        "dynamic_quote_age_seconds": dynamic_selection["quote_age_seconds"],
+                        "dynamic_trailing_volume": dynamic_selection["trailing_volume"],
+                        "dynamic_candidate_number": dynamic_selection["candidate_number"],
+                        "dynamic_max_spread_bps": dynamic_max_spread_bps,
+                        "dynamic_min_depth": dynamic_min_depth,
+                        "dynamic_max_quote_age_seconds": dynamic_max_quote_age_seconds,
+                        "dynamic_volume_lookback_minutes": dynamic_volume_lookback_minutes,
+                    }
+                )
 
             if korea_row is not None:
                 row.update(
@@ -719,6 +1068,36 @@ def build_granger_panel(
                 if treasury_row is not None
                 else np.nan
             )
+
+            for control_name in KOREAN_INTRADAY_MACRO_FILES:
+                control_frame = macro[control_name]
+                latest_control = (
+                    _latest_at_or_before(control_frame, scheduled_utc)
+                    if not control_frame.empty
+                    else None
+                )
+                prior_control = (
+                    _latest_at_or_before(
+                        control_frame,
+                        latest_control["timestamp_utc"] - pd.Timedelta(minutes=30),
+                    )
+                    if latest_control is not None
+                    else None
+                )
+                row[f"{control_name}_return_latest"] = _safe_log_ratio(
+                    latest_control.get("close") if latest_control is not None else np.nan,
+                    prior_control.get("close") if prior_control is not None else np.nan,
+                )
+                row[f"{control_name}_timestamp_utc"] = (
+                    latest_control.get("timestamp_utc")
+                    if latest_control is not None
+                    else pd.NaT
+                )
+                row[f"{control_name}_is_proxy"] = (
+                    bool(latest_control.get("is_proxy", False))
+                    if latest_control is not None
+                    else pd.NA
+                )
 
             row.update(
                 _tick_window_features(
@@ -887,7 +1266,6 @@ def build_arbitrage_panel(
         ) / std.replace(0, np.nan)
 
     local_minutes = panel["timestamp_ny"].dt.hour * 60 + panel["timestamp_ny"].dt.minute
-    panel["minutes_from_0400"] = local_minutes - 4 * 60
     panel["minutes_from_0930"] = local_minutes - (9 * 60 + 30)
     panel["session"] = np.select(
         [
@@ -898,12 +1276,11 @@ def build_arbitrage_panel(
         ["premarket", "regular", "afterhours"],
         default="outside",
     )
-    panel["is_0400_event"] = local_minutes == 4 * 60
     panel["is_0930_event"] = local_minutes == 9 * 60 + 30
 
     timestamp_columns = ["t_first_trade", "t_first_quote", "t_first_minute_bar"]
     for anchor_type, prefix in (
-        ("premarket_0400", "premarket"),
+        ("premarket_dynamic", "premarket"),
         ("regular_0930", "regular"),
     ):
         event_timestamps = granger_panel[
@@ -920,10 +1297,22 @@ def build_processed_panels(
     raw_dir: Path = DEFAULT_RAW_DIR,
     processed_dir: Path = DEFAULT_PROCESSED_DIR,
     ads_shares_per_ads: float = DEFAULT_ADS_SHARES_PER_ADS,
+    dynamic_max_spread_bps: float = DEFAULT_DYNAMIC_MAX_SPREAD_BPS,
+    dynamic_min_depth: float = DEFAULT_DYNAMIC_MIN_DEPTH,
+    dynamic_max_quote_age_seconds: float = DEFAULT_DYNAMIC_MAX_QUOTE_AGE_SECONDS,
+    dynamic_volume_lookback_minutes: int = DEFAULT_DYNAMIC_VOLUME_LOOKBACK_MINUTES,
 ) -> dict[str, int]:
     """Read raw files and atomically write the two processed feature panels."""
     if ads_shares_per_ads <= 0:
         raise ValueError("ads_shares_per_ads must be positive")
+    if dynamic_max_spread_bps <= 0:
+        raise ValueError("dynamic_max_spread_bps must be positive")
+    if dynamic_min_depth < 0:
+        raise ValueError("dynamic_min_depth must be non-negative")
+    if dynamic_max_quote_age_seconds < 0:
+        raise ValueError("dynamic_max_quote_age_seconds must be non-negative")
+    if dynamic_volume_lookback_minutes <= 0:
+        raise ValueError("dynamic_volume_lookback_minutes must be positive")
     raw_dir = raw_dir.resolve()
     processed_dir = processed_dir.resolve()
     processed_dir.mkdir(parents=True, exist_ok=True)
@@ -954,6 +1343,10 @@ def build_processed_panels(
         tick_quotes,
         tick_trades_available=tick_trades_available,
         tick_quotes_available=tick_quotes_available,
+        dynamic_max_spread_bps=dynamic_max_spread_bps,
+        dynamic_min_depth=dynamic_min_depth,
+        dynamic_max_quote_age_seconds=dynamic_max_quote_age_seconds,
+        dynamic_volume_lookback_minutes=dynamic_volume_lookback_minutes,
     )
     arbitrage_panel = build_arbitrage_panel(
         bars, korea, granger_panel, ads_shares_per_ads
@@ -980,18 +1373,79 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW_DIR)
     parser.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
     parser.add_argument(
+        "--controls",
+        action="store_true",
+        help=(
+            "Download all U.S. market/FX controls, U.S. daily macro controls, "
+            "Korean daily controls, four Korean market benchmarks at five-minute "
+            "frequency, and Korean technology/semiconductor signals before "
+            "building the processed panels."
+        ),
+    )
+    parser.add_argument(
+        "--start-date",
+        type=date.fromisoformat,
+        help="Inclusive control-download start date; defaults to raw SKHY coverage.",
+    )
+    parser.add_argument(
+        "--end-date",
+        type=date.fromisoformat,
+        help="Inclusive control-download end date; defaults to raw SKHY coverage.",
+    )
+    parser.add_argument(
         "--ads-shares-per-ads",
         type=float,
         default=DEFAULT_ADS_SHARES_PER_ADS,
         help="Korean common shares represented by one SKHY ADS (default: 0.1).",
+    )
+    parser.add_argument(
+        "--dynamic-max-spread-bps",
+        type=float,
+        default=DEFAULT_DYNAMIC_MAX_SPREAD_BPS,
+        help="Maximum eligible quoted spread in basis points (default: 100).",
+    )
+    parser.add_argument(
+        "--dynamic-min-depth",
+        type=float,
+        default=DEFAULT_DYNAMIC_MIN_DEPTH,
+        help="Minimum combined displayed bid/ask size (default: 100).",
+    )
+    parser.add_argument(
+        "--dynamic-max-quote-age-seconds",
+        type=float,
+        default=DEFAULT_DYNAMIC_MAX_QUOTE_AGE_SECONDS,
+        help="Maximum age of the latest observable quote (default: 60).",
+    )
+    parser.add_argument(
+        "--dynamic-volume-lookback-minutes",
+        type=int,
+        default=DEFAULT_DYNAMIC_VOLUME_LOOKBACK_MINUTES,
+        help="Completed-bar volume lookback used by the eligibility rule (default: 5).",
     )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if args.controls:
+        inferred_start, inferred_end = _raw_skhy_date_range(args.raw_dir)
+        control_start = args.start_date or inferred_start
+        control_end = args.end_date or inferred_end
+        print(
+            f"Downloading all controls for {control_start} through {control_end}"
+        )
+        control_counts = download_all_controls(
+            args.raw_dir.resolve(), control_start, control_end
+        )
+        print(f"Downloaded {len(control_counts)} control datasets")
     counts = build_processed_panels(
-        args.raw_dir, args.processed_dir, args.ads_shares_per_ads
+        args.raw_dir,
+        args.processed_dir,
+        args.ads_shares_per_ads,
+        args.dynamic_max_spread_bps,
+        args.dynamic_min_depth,
+        args.dynamic_max_quote_age_seconds,
+        args.dynamic_volume_lookback_minutes,
     )
     for path, count in counts.items():
         print(f"{path}: {count:,} rows")

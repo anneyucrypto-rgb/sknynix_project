@@ -18,8 +18,9 @@ GRANGER_PANEL_PATH: Final = PROJECT_DIR / "data" / "processed" / "granger_panel.
 RESULTS_DIR: Final = PROJECT_DIR / "models" / "results"
 MODEL_DOC_PATH: Final = PROJECT_DIR / "design" / "model.md"
 SUMMARY_DOC_PATH: Final = PROJECT_DIR / "design" / "model_summary.md"
-HORIZONS: Final = (5, 10, 30, 60, 90, 120)
-ANCHORS: Final = ("premarket_0400", "regular_0930")
+HORIZONS: Final = (5, 10, 15, 30, 45, 60, 100, 120)
+ANCHORS: Final = ("premarket_dynamic", "regular_0930")
+LAG_SELECTION_CRITERION: Final = "bic"
 BASE_CONTROLS: Final = ("skhy_pre_event_return",)
 MACRO_COMMON: Final = (
     "kospi_return_latest",
@@ -28,6 +29,10 @@ MACRO_COMMON: Final = (
     "vix_change_lag1d",
     "us_2y_yield_change_lag1d",
     "us_10y_yield_change_lag1d",
+)
+KOREAN_MACRO_CONTROLS: Final = (
+    "kospi_return_latest",
+    "usdkrw_return_latest",
 )
 LIQUIDITY_CONTROLS: Final = (
     "skhy_pre_event_volume_z",
@@ -41,18 +46,11 @@ MICROSTRUCTURE_CONTROLS: Final = (
 
 def control_groups(anchor: str) -> dict[str, tuple[str, ...]]:
     """Return anchor-specific, strictly pre-event control blocks."""
-    spy_return = (
-        "spy_pre_event_return_5m"
-        if anchor == "regular_0930"
-        else "spy_pre_event_return"
-    )
-    sector_return = (
-        "soxx_pre_event_return_5m"
-        if anchor == "regular_0930"
-        else "soxx_pre_event_return"
-    )
+    spy_return = "spy_pre_event_return_5m"
+    sector_return = "soxx_pre_event_return_5m"
     return {
         "macro_only": (spy_return, *MACRO_COMMON),
+        "korean_macro_only": KOREAN_MACRO_CONTROLS,
         "sector_only": (sector_return,),
         "liquidity_only": LIQUIDITY_CONTROLS,
         "microstructure_only": MICROSTRUCTURE_CONTROLS,
@@ -132,7 +130,6 @@ def _select_orders(
     sample: pd.DataFrame,
     response: str,
     ar_columns: list[str],
-    criterion: str,
     max_p: int,
     max_q: int,
     hac_maxlags: int,
@@ -149,7 +146,7 @@ def _select_orders(
             if len(sample) <= len(predictors) + 5:
                 continue
             fitted, _ = _fit_ols(sample, response, predictors, hac_maxlags)
-            score = float(getattr(fitted, criterion))
+            score = float(fitted.bic)
             candidates.append((score, p_order, q_order))
     if not candidates:
         raise ValueError("No admissible ARDL lag-order candidate")
@@ -167,7 +164,6 @@ def _fit_specification(
     controls: tuple[str, ...],
     p_order: int,
     q_order: int,
-    criterion: str,
     hac_maxlags: int,
 ) -> dict[str, object]:
     ar_columns = [
@@ -198,7 +194,7 @@ def _fit_specification(
         "ablation": ablation,
         "controls": ", ".join(controls),
         "status": "estimated",
-        "selection_criterion": criterion,
+        "selection_criterion": LAG_SELECTION_CRITERION,
         "p_order": p_order,
         "q_order": q_order,
         "n_obs": int(fitted.nobs),
@@ -218,7 +214,6 @@ def _fit_specification(
 def run_ablations(
     panel: pd.DataFrame,
     *,
-    criterion: str = "bic",
     max_p: int = 2,
     max_q: int = 2,
     hac_maxlags: int = 2,
@@ -256,13 +251,44 @@ def run_ablations(
             ]
             common_sample = anchor_sample.dropna(subset=common_columns).copy()
             if common_sample.empty:
-                raise ValueError(f"No complete observations for {anchor}, {horizon}m")
+                for name, controls in {
+                    "baseline": (),
+                    **control_groups(anchor),
+                }.items():
+                    records.append(
+                        {
+                            "anchor_type": anchor,
+                            "horizon_minutes": horizon,
+                            "response_column": response,
+                            "ablation": name,
+                            "controls": ", ".join(controls),
+                            "status": "unavailable_anchor_or_sample",
+                            "selection_criterion": LAG_SELECTION_CRITERION,
+                            "p_order": np.nan,
+                            "q_order": np.nan,
+                            "n_obs": 0,
+                            "sample_start": None,
+                            "sample_end": None,
+                            "beta_kr_current": np.nan,
+                            "beta_kr_current_std_error_hac": np.nan,
+                            "beta_kr_current_pvalue_hac": np.nan,
+                            "korean_block_wald_stat_hac": np.nan,
+                            "korean_block_wald_pvalue_hac": np.nan,
+                            "adjusted_r2": np.nan,
+                            "aic": np.nan,
+                            "bic": np.nan,
+                            "beta_change_from_baseline": np.nan,
+                            "abs_beta_change_from_baseline": np.nan,
+                            "pct_beta_change_from_baseline": np.nan,
+                            "largest_abs_change_in_cell": False,
+                        }
+                    )
+                continue
 
             p_order, q_order = _select_orders(
                 common_sample,
                 response,
                 ar_max,
-                criterion,
                 max_p,
                 max_q,
                 hac_maxlags,
@@ -277,7 +303,6 @@ def run_ablations(
                     controls=(),
                     p_order=p_order,
                     q_order=q_order,
-                    criterion=criterion,
                     hac_maxlags=hac_maxlags,
                 )
             ]
@@ -292,7 +317,6 @@ def run_ablations(
                         controls=controls,
                         p_order=p_order,
                         q_order=q_order,
-                        criterion=criterion,
                         hac_maxlags=hac_maxlags,
                     )
                 )
@@ -329,7 +353,7 @@ def run_ablations(
                         "ablation": name,
                         "controls": ", ".join(controls),
                         "status": "unavailable_controls",
-                        "selection_criterion": criterion,
+                        "selection_criterion": LAG_SELECTION_CRITERION,
                         "p_order": p_order,
                         "q_order": q_order,
                         "n_obs": 0,
@@ -369,7 +393,7 @@ def _markdown_table(headers: list[str], rows: list[list[object]]) -> str:
     return "\n".join(lines)
 
 
-def write_model_design(path: Path, criterion: str, max_p: int, max_q: int) -> None:
+def write_model_design(path: Path, max_p: int, max_q: int) -> None:
     text = f"""# Event-time ARDL Granger ablation design
 
 ## Objective
@@ -382,18 +406,61 @@ Korean coefficient most.
 
 For anchor `a` and horizon `h`:
 
-\\[
-r_{{d,a}}^{{US,h}}=\\alpha_h
-+\\sum_{{i=1}}^p\\phi_{{i,h}}r_{{d-i,a}}^{{US,h}}
-+\\sum_{{j=0}}^q\\beta_{{j,h}}r_{{d-j}}^{{KR}}
-+\\rho_h r_{{d,a}}^{{SKHY,pre}}
-+\\Gamma_h X_{{d,a}}+\\varepsilon_{{d,a,h}}.
-\\]
+$$
+\\begin{{aligned}}
+r_{{d,a}}^{{US,h}}
+&= \\alpha_{{a,h}}
++ \\sum_{{i=1}}^p \\phi_{{i,a,h}} r_{{d-i,a}}^{{US,h}} \\\\
+&\\quad + \\sum_{{j=0}}^q \\beta_{{j,a,h}} r_{{d-j}}^{{KR}}
++ \\rho_{{a,h}} r_{{d,a}}^{{SKHY,pre}} \\\\
+&\\quad + \\boldsymbol{{\\gamma}}_{{a,h}}^\\mathsf{{T}} X_{{d,a}}
++ \\varepsilon_{{d,a,h}} .
+\\end{{aligned}}
+$$
 
 The dependent variable is
 `skhy_fwd_return_{{h}}m = ln(P[t0+h]/P[t0])` for
-`h = 5, 10, 30, 60, 90, 120`. Models are estimated separately at 04:00 and
-09:30 New York time.
+
+$$
+H = \\left\{{5,10,15,30,45,60,100,120\\right\}}\\ \\text{{minutes}}.
+$$
+
+Models are estimated separately at `premarket_dynamic` and `regular_0930`,
+yielding 16 conceptual anchor--horizon observations per U.S. trading day before
+missing-price and execution-availability filters.
+
+## Event anchors
+
+| Anchor | Selection | Purpose |
+|---|---|---|
+| `premarket_dynamic` | Earliest eligible five-minute decision timestamp from 07:00 through 09:20 ET | Detect Korean-driven price discovery during the Schwab premarket session |
+| `regular_0930` | Fixed 09:30 ET research timestamp | Measure residual price discovery during regular trading |
+
+The dynamic candidate set is
+
+$$
+\\mathcal{{T}}_d=\\{{t:07\\!:\\!00\\leq t<09\\!:\\!25,\\ t\\text{{ is observable}}\\}}.
+$$
+
+At each candidate, the latest observable quote must have a positive bid, an ask
+strictly above the bid, spread no greater than `S_max`, combined displayed depth
+at least `D_min`, and quote age no greater than `A_max`. Completed-bar volume
+over `[t-L,t)` must be positive. The selected anchor is
+
+$$
+t_d^*=\\min\\{{t\\in\\mathcal{{T}}_d:\\text{{ all liquidity filters pass}}\\}}.
+$$
+
+The default, predeclared thresholds are `S_max = 100` bps, `D_min = 100`
+displayed-size units, `A_max = 60` seconds, and `L = 5` minutes. They are
+configurable in `ingestion/features.py` and use no return or future-price
+information. If full quote ticks are absent or no candidate qualifies, the
+anchor is recorded as unavailable rather than replaced by an invented time or
+price.
+
+At 09:30, the five-minute bar open is only a research reference price. First
+trade and quote fields remain separate execution diagnostics and are not
+treated as guaranteed fills.
 
 ## Predictor blocks
 
@@ -402,19 +469,19 @@ The dependent variable is
 - Own-history control: `skhy_pre_event_return`.
 - Macro-only: pre-event SPY, KOSPI return, USD/KRW return, lagged VIX level
   and change, and lagged U.S. 2Y/10Y yield changes.
+- Korean-macro-only: KOSPI return and USD/KRW return.
 - Sector-only: pre-event SOXX return.
 - Liquidity-only: `skhy_pre_event_volume_z` and `skhy_vwap_deviation`.
 - Microstructure-only: `skhy_pre_event_rv_30m` plus the two liquidity fields.
 
-At 09:30, SPY and SOXX use exact five-minute returns ending at the anchor. At
-04:00, no preceding U.S. five-minute bar exists, so their previous-close-to-
-anchor returns are used. Korean 3Y/10Y yields and a Korean sector index are not
+At both anchors, SPY and SOXX use exact five-minute returns ending at the
+anchor. Korean 3Y/10Y yields and a Korean sector index are not
 included because no validated daily source is currently ingested; they are
 reported as unavailable rather than replaced with proxies.
 
-Historical pre-event spreads, depth, and order imbalance are also unavailable.
-The stored trade/quote window variables begin at `t0`, so they are outcomes or
-mediators and are excluded from predictive controls to prevent look-ahead bias.
+Dynamic-anchor spread, depth, quote age, and trailing volume are eligibility
+variables only. Stored post-anchor trade/quote windows are outcomes or mediators
+and are excluded from predictive controls to prevent look-ahead bias.
 
 The baseline contains the intercept, selected U.S. AR terms, Korean block, and
 own-history control. Each ablation adds exactly one control group.
@@ -423,20 +490,24 @@ own-history control. Each ablation adds exactly one control group.
 
 For each anchor/horizon, all estimable specifications use the same complete-case
 dates. Lag orders are selected once from the unrestricted baseline over
-`p = 0..{max_p}` and `q = 0..{max_q}` by minimum {criterion.upper()}, then held
+`p = 0..{max_p}` and `q = 0..{max_q}` by minimum BIC, then held
 fixed across ablations. The reported change is
 
-\\[
-\\Delta\\beta_0^g=\\hat\\beta_0^g-\\hat\\beta_0^{{baseline}},
-\\]
+$$
+\\Delta \\beta_0^g
+= \\widehat{{\\beta}}_0^g
+- \\widehat{{\\beta}}_0^{{\\mathrm{{baseline}}}} .
+$$
 
-and the group with the largest `abs(Delta beta)` changes the Korean coefficient
-most for that anchor/horizon. Inference uses OLS coefficients with HAC standard
-errors. The Korean-block Wald test evaluates
-`H0: beta_0 = ... = beta_q = 0`.
+and the group with the largest $|\\Delta\\beta_0^g|$ changes the Korean
+coefficient most for that anchor/horizon. Inference uses OLS coefficients with
+HAC standard errors. The Korean-block Wald test evaluates
 
-Liquidity and microstructure controls are unavailable at 04:00 because the six
-required five-minute pre-event bars do not exist. Those cells are marked
+$$
+H_0:\\quad \\beta_0 = \\beta_1 = \\cdots = \\beta_q = 0 .
+$$
+
+Unavailable dynamic anchors and incomplete pre-event windows are marked
 unavailable, not zero-filled. Results are exploratory because the current
 sample is short and tests multiple horizons.
 """
@@ -508,6 +579,9 @@ def write_model_summary(results: pd.DataFrame, path: Path) -> None:
                 f"{group_changes.get('macro_only', np.nan):.4f}"
                 if "macro_only" in group_changes
                 else "—",
+                f"{group_changes.get('korean_macro_only', np.nan):.4f}"
+                if "korean_macro_only" in group_changes
+                else "—",
                 f"{group_changes.get('sector_only', np.nan):.4f}"
                 if "sector_only" in group_changes
                 else "—",
@@ -545,6 +619,34 @@ def write_model_summary(results: pd.DataFrame, path: Path) -> None:
             ["anchor_type", "horizon_minutes"]
         ).iterrows()
     ]
+
+    def significance_sentence(anchor: str) -> str:
+        anchor_rows = baseline_results[baseline_results["anchor_type"] == anchor]
+        if anchor_rows.empty:
+            return f"At `{anchor}`, no baseline model is estimable in this run."
+        beta_horizons = anchor_rows.loc[
+            anchor_rows["beta_kr_current_pvalue_hac"] < 0.05, "horizon_minutes"
+        ].astype(int).tolist()
+        block_horizons = anchor_rows.loc[
+            anchor_rows["korean_block_wald_pvalue_hac"] < 0.05, "horizon_minutes"
+        ].astype(int).tolist()
+
+        def describe(values: list[int]) -> str:
+            if not values:
+                return "none of the"
+            labels = [f"{value}-minute" for value in values]
+            joined = labels[0] if len(labels) == 1 else ", ".join(labels[:-1]) + f" and {labels[-1]}"
+            return f"the {joined}"
+
+        return (
+            f"At `{anchor}`, the current Korean coefficient is significant at "
+            f"5% for {describe(beta_horizons)} responses; the selected Korean "
+            f"block is jointly significant for {describe(block_horizons)} responses."
+        )
+
+    inference_text = "\n\n".join(
+        significance_sentence(anchor) for anchor in ANCHORS
+    )
     singapore_tz = ZoneInfo("Asia/Singapore")
     generated = datetime.now(singapore_tz).strftime("%Y-%m-%d %H:%M:%S SGT")
     text = f"""# Granger ablation results summary
@@ -553,9 +655,17 @@ Generated: {generated}
 
 ## Overall control-group influence
 
-The table ranks groups using the absolute change in the current Korean-return
-coefficient relative to the no-group baseline. A larger change is sensitivity,
-not proof that the control is causal.
+The table ranks groups using the absolute coefficient change
+
+$$
+\\left|\\Delta \\beta_0^g\\right|
+= \\left|
+\\widehat{{\\beta}}_0^g
+- \\widehat{{\\beta}}_0^{{\\mathrm{{baseline}}}}
+\\right| .
+$$
+
+A larger change is sensitivity, not proof that the control is causal.
 
 {_markdown_table(['Control group', 'Estimable cells', 'Mean abs change', 'Median abs change', 'Maximum abs change'], group_rows)}
 
@@ -569,38 +679,38 @@ Its coefficient shifts can therefore reflect common-factor adjustment, but
 also multicollinearity or over-parameterization. Treat the ranking as a
 sensitivity diagnostic rather than evidence that the macro block is causal.
 
-Because liquidity is estimable only at 09:30, the like-for-like regular-session
-comparison is:
+The regular-session-only comparison is:
 
 {_markdown_table(['Control group', 'Regular cells', 'Mean abs change', 'Median abs change', 'Maximum abs change'], regular_rows)}
 
 ## Anchor-by-horizon comparison
 
-`Macro`, `sector`, and `liquidity` columns report
-`abs(beta_group - beta_baseline)`.
+`Macro`, `Korean macro`, `sector`, `liquidity`, and `microstructure` columns
+report the absolute coefficient change defined above.
 
-{_markdown_table(['Anchor', 'Horizon', 'Baseline beta KR', 'Macro', 'Sector', 'Liquidity', 'Microstructure', 'Largest change', 'Selected order', 'N'], headline_rows)}
+{_markdown_table(['Anchor', 'Horizon', 'Baseline beta KR', 'Macro', 'Korean macro', 'Sector', 'Liquidity', 'Microstructure', 'Largest change', 'Selected order', 'N'], headline_rows)}
 
 ## Baseline Granger inference
 
-`Beta p` is the HAC p-value for the current Korean-return coefficient.
-`Block p` is the HAC joint Wald p-value for all selected Korean-return terms.
+`Beta KR` is $\\widehat{{\\beta}}_0$, the estimated change in the future SKHY
+log return associated with a one-unit increase in `kr_return_0`, conditional on
+the selected lags and controls. Its sign gives the direction of the association.
+`Beta p` is the two-sided HAC-robust p-value for
+$H_0:\\beta_0=0$; it measures evidence against a zero current-Korean-return
+coefficient, not the economic size of the coefficient. `Block p` is the
+HAC-robust joint Wald p-value for all Korean-return terms retained by BIC.
 
 {_markdown_table(['Anchor', 'Horizon', 'Beta KR', 'Beta p', 'Block p', 'Selected order', 'N'], baseline_rows)}
 
-At the 04:00 anchor, the current Korean coefficient is significant at 5% for
-the 60-, 90-, and 120-minute baseline responses. The 10-minute baseline selects
-`q=2`: its current-return coefficient is not individually significant, but the
-Korean block is jointly significant. No 09:30 baseline Korean coefficient or
-joint block is significant at 5%.
+{inference_text}
 
 ## Availability
 
 Unavailable cells: {unavailable_text}.
 
-Liquidity-only and microstructure-only models at 04:00 are unavailable because
-the source panel has no complete 30-minute pre-event window at the start of
-premarket.
+Dynamic-premarket cells are unavailable when full quote ticks are absent, no
+candidate passes the predeclared liquidity filters, or the required model
+variables are incomplete. No unavailable anchor is time- or price-filled.
 
 ## Interpretation limits
 
@@ -608,7 +718,7 @@ premarket.
   an anchor/horizon cell.
 - HAC inference is reported in the machine-readable results, but coefficient
   movement alone does not establish significance or causal mediation.
-- The six horizons overlap, the sample is small, and no multiple-testing
+- The eight horizons overlap, the sample is small, and no multiple-testing
   correction is applied in this descriptive ablation ranking.
 - Post-anchor trade/quote variables are excluded to prevent look-ahead bias.
 
@@ -623,7 +733,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--panel", type=Path, default=GRANGER_PANEL_PATH)
     parser.add_argument("--results-dir", type=Path, default=RESULTS_DIR)
-    parser.add_argument("--criterion", choices=("bic", "aic"), default="bic")
     parser.add_argument("--max-p", type=int, default=2)
     parser.add_argument("--max-q", type=int, default=2)
     parser.add_argument("--hac-maxlags", type=int, default=2)
@@ -640,7 +749,6 @@ def main() -> int:
     panel = load_granger_panel(args.panel)
     results = run_ablations(
         panel,
-        criterion=args.criterion,
         max_p=args.max_p,
         max_q=args.max_q,
         hac_maxlags=args.hac_maxlags,
@@ -648,7 +756,7 @@ def main() -> int:
     args.results_dir.mkdir(parents=True, exist_ok=True)
     parquet_path = args.results_dir / "granger_ablation_results.parquet"
     results.to_parquet(parquet_path, index=False, compression="zstd")
-    write_model_design(MODEL_DOC_PATH, args.criterion, args.max_p, args.max_q)
+    write_model_design(MODEL_DOC_PATH, args.max_p, args.max_q)
     write_model_summary(results, SUMMARY_DOC_PATH)
 
     estimated = results[results["status"] == "estimated"]

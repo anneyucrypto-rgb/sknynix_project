@@ -1,95 +1,100 @@
 # Granger ablation results summary
 
-Generated: 2026-11-11 18:38:39 SGT
+Generated: 2026-11-12 15:50:51 SGT
 
 ## Overall control-group influence
 
-The table ranks groups using the absolute change in the current Korean-return
-coefficient relative to the no-group baseline. A larger change is sensitivity,
-not proof that the control is causal.
+The table ranks groups using the absolute coefficient change
+
+$$
+\left|\Delta \beta_0^g\right|
+= \left|
+\widehat{\beta}_0^g
+- \widehat{\beta}_0^{\mathrm{baseline}}
+\right| .
+$$
+
+A larger change is sensitivity, not proof that the control is causal.
 
 | Control group | Estimable cells | Mean abs change | Median abs change | Maximum abs change |
 |---|---|---|---|---|
-| liquidity_only | 6 | 0.0042 | 0.0044 | 0.0063 |
-| macro_only | 12 | 0.1176 | 0.1089 | 0.2416 |
-| microstructure_only | 6 | 0.0064 | 0.0058 | 0.0126 |
-| sector_only | 12 | 0.0071 | 0.0020 | 0.0201 |
+| korean_macro_only | 8 | 0.1469 | 0.1685 | 0.2264 |
+| liquidity_only | 8 | 0.0039 | 0.0040 | 0.0071 |
+| macro_only | 8 | 0.1535 | 0.1683 | 0.2397 |
+| microstructure_only | 8 | 0.0068 | 0.0064 | 0.0154 |
+| sector_only | 8 | 0.0163 | 0.0208 | 0.0238 |
 
 The per-cell winner count identifies `macro_only` as the most frequent
 source of Korean-coefficient movement in this run:
 
 | Control group | Anchor/horizon wins |
 |---|---|
-| macro_only | 12 |
+| macro_only | 6 |
+| korean_macro_only | 2 |
 
 The macro block contains seven controls in a sample of roughly 80 event days.
 Its coefficient shifts can therefore reflect common-factor adjustment, but
 also multicollinearity or over-parameterization. Treat the ranking as a
 sensitivity diagnostic rather than evidence that the macro block is causal.
 
-Because liquidity is estimable only at 09:30, the like-for-like regular-session
-comparison is:
+The regular-session-only comparison is:
 
 | Control group | Regular cells | Mean abs change | Median abs change | Maximum abs change |
 |---|---|---|---|---|
-| liquidity_only | 6 | 0.0042 | 0.0044 | 0.0063 |
-| macro_only | 6 | 0.1365 | 0.1484 | 0.2416 |
-| microstructure_only | 6 | 0.0064 | 0.0058 | 0.0126 |
-| sector_only | 6 | 0.0137 | 0.0177 | 0.0201 |
+| korean_macro_only | 8 | 0.1469 | 0.1685 | 0.2264 |
+| liquidity_only | 8 | 0.0039 | 0.0040 | 0.0071 |
+| macro_only | 8 | 0.1535 | 0.1683 | 0.2397 |
+| microstructure_only | 8 | 0.0068 | 0.0064 | 0.0154 |
+| sector_only | 8 | 0.0163 | 0.0208 | 0.0238 |
 
 ## Anchor-by-horizon comparison
 
-`Macro`, `sector`, and `liquidity` columns report
-`abs(beta_group - beta_baseline)`.
+`Macro`, `Korean macro`, `sector`, `liquidity`, and `microstructure` columns
+report the absolute coefficient change defined above.
 
-| Anchor | Horizon | Baseline beta KR | Macro | Sector | Liquidity | Microstructure | Largest change | Selected order | N |
-|---|---|---|---|---|---|---|---|---|---|
-| premarket_0400 | 5 | -0.0220 | 0.1059 | 0.0002 | — | — | macro_only | p=0, q=0 | 85 |
-| premarket_0400 | 10 | -0.0167 | 0.0775 | 0.0000 | — | — | macro_only | p=0, q=2 | 85 |
-| premarket_0400 | 30 | -0.0067 | 0.1118 | 0.0016 | — | — | macro_only | p=1, q=0 | 85 |
-| premarket_0400 | 60 | -0.0355 | 0.1159 | 0.0012 | — | — | macro_only | p=0, q=0 | 85 |
-| premarket_0400 | 90 | -0.0626 | 0.0786 | 0.0005 | — | — | macro_only | p=1, q=0 | 82 |
-| premarket_0400 | 120 | -0.0691 | 0.1018 | 0.0002 | — | — | macro_only | p=1, q=0 | 81 |
-| regular_0930 | 5 | 0.0115 | 0.0057 | 0.0024 | 0.0044 | 0.0039 | macro_only | p=0, q=0 | 84 |
-| regular_0930 | 10 | 0.0061 | 0.0401 | 0.0048 | 0.0045 | 0.0067 | macro_only | p=0, q=0 | 84 |
-| regular_0930 | 30 | -0.0558 | 0.2416 | 0.0183 | 0.0034 | 0.0030 | macro_only | p=0, q=0 | 84 |
-| regular_0930 | 60 | -0.0822 | 0.2351 | 0.0201 | 0.0019 | 0.0049 | macro_only | p=0, q=0 | 84 |
-| regular_0930 | 90 | -0.0724 | 0.1242 | 0.0192 | 0.0063 | 0.0072 | macro_only | p=0, q=0 | 84 |
-| regular_0930 | 120 | -0.0891 | 0.1726 | 0.0172 | 0.0044 | 0.0126 | macro_only | p=0, q=0 | 84 |
+| Anchor | Horizon | Baseline beta KR | Macro | Korean macro | Sector | Liquidity | Microstructure | Largest change | Selected order | N |
+|---|---|---|---|---|---|---|---|---|---|---|
+| regular_0930 | 5 | 0.0038 | 0.0111 | 0.0155 | 0.0031 | 0.0054 | 0.0047 | korean_macro_only | p=0, q=1 | 85 |
+| regular_0930 | 10 | 0.0053 | 0.0391 | 0.0303 | 0.0052 | 0.0042 | 0.0066 | macro_only | p=0, q=0 | 85 |
+| regular_0930 | 15 | -0.0120 | 0.1539 | 0.1371 | 0.0101 | 0.0071 | 0.0061 | macro_only | p=0, q=0 | 85 |
+| regular_0930 | 30 | -0.0547 | 0.2397 | 0.2264 | 0.0205 | 0.0036 | 0.0029 | macro_only | p=0, q=0 | 85 |
+| regular_0930 | 45 | -0.0832 | 0.2219 | 0.2086 | 0.0232 | 0.0004 | 0.0037 | macro_only | p=0, q=0 | 85 |
+| regular_0930 | 60 | -0.0756 | 0.2257 | 0.2206 | 0.0236 | 0.0021 | 0.0068 | macro_only | p=0, q=0 | 85 |
+| regular_0930 | 100 | -0.0599 | 0.1771 | 0.1764 | 0.0238 | 0.0038 | 0.0086 | macro_only | p=0, q=0 | 85 |
+| regular_0930 | 120 | -0.0779 | 0.1596 | 0.1605 | 0.0211 | 0.0042 | 0.0154 | korean_macro_only | p=0, q=0 | 85 |
 
 ## Baseline Granger inference
 
-`Beta p` is the HAC p-value for the current Korean-return coefficient.
-`Block p` is the HAC joint Wald p-value for all selected Korean-return terms.
+`Beta KR` is $\widehat{\beta}_0$, the estimated change in the future SKHY
+log return associated with a one-unit increase in `kr_return_0`, conditional on
+the selected lags and controls. Its sign gives the direction of the association.
+`Beta p` is the two-sided HAC-robust p-value for
+$H_0:\beta_0=0$; it measures evidence against a zero current-Korean-return
+coefficient, not the economic size of the coefficient. `Block p` is the
+HAC-robust joint Wald p-value for all Korean-return terms retained by BIC.
 
 | Anchor | Horizon | Beta KR | Beta p | Block p | Selected order | N |
 |---|---|---|---|---|---|---|
-| premarket_0400 | 5 | -0.0220 | 0.1350 | 0.1350 | p=0, q=0 | 85 |
-| premarket_0400 | 10 | -0.0167 | 0.2909 | 0.0007 | p=0, q=2 | 85 |
-| premarket_0400 | 30 | -0.0067 | 0.7335 | 0.7335 | p=1, q=0 | 85 |
-| premarket_0400 | 60 | -0.0355 | 0.0349 | 0.0349 | p=0, q=0 | 85 |
-| premarket_0400 | 90 | -0.0626 | 0.0005 | 0.0005 | p=1, q=0 | 82 |
-| premarket_0400 | 120 | -0.0691 | 0.0130 | 0.0130 | p=1, q=0 | 81 |
-| regular_0930 | 5 | 0.0115 | 0.6099 | 0.6099 | p=0, q=0 | 84 |
-| regular_0930 | 10 | 0.0061 | 0.8674 | 0.8674 | p=0, q=0 | 84 |
-| regular_0930 | 30 | -0.0558 | 0.3184 | 0.3184 | p=0, q=0 | 84 |
-| regular_0930 | 60 | -0.0822 | 0.2366 | 0.2366 | p=0, q=0 | 84 |
-| regular_0930 | 90 | -0.0724 | 0.3271 | 0.3271 | p=0, q=0 | 84 |
-| regular_0930 | 120 | -0.0891 | 0.2117 | 0.2117 | p=0, q=0 | 84 |
+| regular_0930 | 5 | 0.0038 | 0.8398 | 0.3009 | p=0, q=1 | 85 |
+| regular_0930 | 10 | 0.0053 | 0.8819 | 0.8819 | p=0, q=0 | 85 |
+| regular_0930 | 15 | -0.0120 | 0.8156 | 0.8156 | p=0, q=0 | 85 |
+| regular_0930 | 30 | -0.0547 | 0.3226 | 0.3226 | p=0, q=0 | 85 |
+| regular_0930 | 45 | -0.0832 | 0.2235 | 0.2235 | p=0, q=0 | 85 |
+| regular_0930 | 60 | -0.0756 | 0.2767 | 0.2767 | p=0, q=0 | 85 |
+| regular_0930 | 100 | -0.0599 | 0.4217 | 0.4217 | p=0, q=0 | 85 |
+| regular_0930 | 120 | -0.0779 | 0.2802 | 0.2802 | p=0, q=0 | 85 |
 
-At the 04:00 anchor, the current Korean coefficient is significant at 5% for
-the 60-, 90-, and 120-minute baseline responses. The 10-minute baseline selects
-`q=2`: its current-return coefficient is not individually significant, but the
-Korean block is jointly significant. No 09:30 baseline Korean coefficient or
-joint block is significant at 5%.
+At `premarket_dynamic`, no baseline model is estimable in this run.
+
+At `regular_0930`, the current Korean coefficient is significant at 5% for none of the responses; the selected Korean block is jointly significant for none of the responses.
 
 ## Availability
 
-Unavailable cells: premarket_0400/5m/liquidity_only, premarket_0400/5m/microstructure_only, premarket_0400/10m/liquidity_only, premarket_0400/10m/microstructure_only, premarket_0400/30m/liquidity_only, premarket_0400/30m/microstructure_only, premarket_0400/60m/liquidity_only, premarket_0400/60m/microstructure_only, premarket_0400/90m/liquidity_only, premarket_0400/90m/microstructure_only, premarket_0400/120m/liquidity_only, premarket_0400/120m/microstructure_only.
+Unavailable cells: premarket_dynamic/5m/baseline, premarket_dynamic/5m/korean_macro_only, premarket_dynamic/5m/liquidity_only, premarket_dynamic/5m/macro_only, premarket_dynamic/5m/microstructure_only, premarket_dynamic/5m/sector_only, premarket_dynamic/10m/baseline, premarket_dynamic/10m/korean_macro_only, premarket_dynamic/10m/liquidity_only, premarket_dynamic/10m/macro_only, premarket_dynamic/10m/microstructure_only, premarket_dynamic/10m/sector_only, premarket_dynamic/15m/baseline, premarket_dynamic/15m/korean_macro_only, premarket_dynamic/15m/liquidity_only, premarket_dynamic/15m/macro_only, premarket_dynamic/15m/microstructure_only, premarket_dynamic/15m/sector_only, premarket_dynamic/30m/baseline, premarket_dynamic/30m/korean_macro_only, premarket_dynamic/30m/liquidity_only, premarket_dynamic/30m/macro_only, premarket_dynamic/30m/microstructure_only, premarket_dynamic/30m/sector_only, premarket_dynamic/45m/baseline, premarket_dynamic/45m/korean_macro_only, premarket_dynamic/45m/liquidity_only, premarket_dynamic/45m/macro_only, premarket_dynamic/45m/microstructure_only, premarket_dynamic/45m/sector_only, premarket_dynamic/60m/baseline, premarket_dynamic/60m/korean_macro_only, premarket_dynamic/60m/liquidity_only, premarket_dynamic/60m/macro_only, premarket_dynamic/60m/microstructure_only, premarket_dynamic/60m/sector_only, premarket_dynamic/100m/baseline, premarket_dynamic/100m/korean_macro_only, premarket_dynamic/100m/liquidity_only, premarket_dynamic/100m/macro_only, premarket_dynamic/100m/microstructure_only, premarket_dynamic/100m/sector_only, premarket_dynamic/120m/baseline, premarket_dynamic/120m/korean_macro_only, premarket_dynamic/120m/liquidity_only, premarket_dynamic/120m/macro_only, premarket_dynamic/120m/microstructure_only, premarket_dynamic/120m/sector_only.
 
-Liquidity-only and microstructure-only models at 04:00 are unavailable because
-the source panel has no complete 30-minute pre-event window at the start of
-premarket.
+Dynamic-premarket cells are unavailable when full quote ticks are absent, no
+candidate passes the predeclared liquidity filters, or the required model
+variables are incomplete. No unavailable anchor is time- or price-filled.
 
 ## Interpretation limits
 
@@ -97,7 +102,7 @@ premarket.
   an anchor/horizon cell.
 - HAC inference is reported in the machine-readable results, but coefficient
   movement alone does not establish significance or causal mediation.
-- The six horizons overlap, the sample is small, and no multiple-testing
+- The eight horizons overlap, the sample is small, and no multiple-testing
   correction is applied in this descriptive ablation ranking.
 - Post-anchor trade/quote variables are excluded to prevent look-ahead bias.
 

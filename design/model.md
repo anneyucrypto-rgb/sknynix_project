@@ -10,13 +10,13 @@ Korean coefficient most.
 
 For anchor `a` and horizon `h`:
 
-\[
+$$
 r_{d,a}^{US,h}=\alpha_h
 +\sum_{i=1}^p\phi_{i,h}r_{d-i,a}^{US,h}
 +\sum_{j=0}^q\beta_{j,h}r_{d-j}^{KR}
 +\rho_h r_{d,a}^{SKHY,pre}
 +\Gamma_h X_{d,a}+\varepsilon_{d,a,h}.
-\]
+$$
 
 The dependent variable is
 `skhy_fwd_return_{h}m = ln(P[t0+h]/P[t0])` for

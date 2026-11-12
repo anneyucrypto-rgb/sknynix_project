@@ -658,11 +658,9 @@ Generated: {generated}
 The table ranks groups using the absolute coefficient change
 
 $$
-\\left|\\Delta \\beta_0^g\\right|
-= \\left|
-\\widehat{{\\beta}}_0^g
-- \\widehat{{\\beta}}_0^{{\\mathrm{{baseline}}}}
-\\right| .
+\\lvert \\Delta \\beta_0^g \\rvert
+= \\lvert \\widehat{{\\beta}}_0^g
+- \\widehat{{\\beta}}_0^{{\\mathrm{{baseline}}}} \\rvert .
 $$
 
 A larger change is sensitivity, not proof that the control is causal.

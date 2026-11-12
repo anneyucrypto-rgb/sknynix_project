@@ -4,3 +4,5 @@ __pycache__/
 *.py[cod]
 ingestion/.env
 ingestion/*.part
+data/raw/us/SKHY_quotes.parquet.part
+data/raw/us/SKHY_trades.parquet

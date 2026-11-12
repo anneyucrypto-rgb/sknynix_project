@@ -11,6 +11,7 @@ Korean coefficient most.
 For anchor `a` and horizon `h`:
 
 $$
+<<<<<<< HEAD
 \begin{aligned}
 r_{d,a}^{US,h}
 &= \alpha_{a,h}
@@ -20,6 +21,13 @@ r_{d,a}^{US,h}
 &\quad + \boldsymbol{\gamma}_{a,h}^\mathsf{T} X_{d,a}
 + \varepsilon_{d,a,h} .
 \end{aligned}
+=======
+r_{d,a}^{US,h}=\alpha_h
++\sum_{i=1}^p\phi_{i,h}r_{d-i,a}^{US,h}
++\sum_{j=0}^q\beta_{j,h}r_{d-j}^{KR}
++\rho_h r_{d,a}^{SKHY,pre}
++\Gamma_h X_{d,a}+\varepsilon_{d,a,h}.
+>>>>>>> 9517c276f3bfdd376d5e7cf3b1109356482038e6
 $$
 
 The dependent variable is

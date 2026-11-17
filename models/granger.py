@@ -14,7 +14,10 @@ import statsmodels.api as sm
 
 
 PROJECT_DIR: Final = Path(__file__).resolve().parents[1]
-GRANGER_PANEL_PATH: Final = PROJECT_DIR / "data" / "processed" / "granger_panel.parquet"
+GRANGER_PANEL_PATH: Final = (
+    PROJECT_DIR / "data" / "features" / "experiments" / "run_id=legacy"
+    / "granger_panel.parquet"
+)
 RESULTS_DIR: Final = PROJECT_DIR / "models" / "results"
 MODEL_DOC_PATH: Final = PROJECT_DIR / "design" / "model.md"
 SUMMARY_DOC_PATH: Final = PROJECT_DIR / "design" / "model_summary.md"
@@ -453,7 +456,7 @@ $$
 
 The default, predeclared thresholds are `S_max = 100` bps, `D_min = 100`
 displayed-size units, `A_max = 60` seconds, and `L = 5` minutes. They are
-configurable in `ingestion/features.py` and use no return or future-price
+recorded in the legacy experiment specification and use no return or future-price
 information. If full quote ticks are absent or no candidate qualifies, the
 anchor is recorded as unavailable rather than replaced by an invented time or
 price.

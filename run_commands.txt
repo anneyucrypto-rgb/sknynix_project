@@ -1,11 +1,27 @@
-python3 download.py --start-date 2026-06-01 --end-date 2026-11-11 --pairs LPL --full-ticks --skip-controls
+# Run from the repository root. API keys are read from the environment or .env.
 
-SKHY / 000660.KS
-LPL / 034220.KS
-SKM / 017670.KS
-KT / 030200.KS
-PKX / 005490.KS
-KB / 105560.KS
-SHG / 055550.KS
-WF / 316140.KS
-KEP / 015760.KS
+# Install/refresh the Python environment.
+python -m pip install -r requirements.txt
+
+# Incrementally populate raw inputs. Covered intervals are skipped and only
+# uncovered leading/trailing ranges are requested.
+python -m src.ingestion.massive_us --start-date 2026-06-01 --end-date 2026-11-11 --trades --quotes
+python -m src.ingestion.korean_daily --start-date 2020-01-01 --end-date 2026-11-11
+python -m src.ingestion.fx_data --start-date 2026-06-01 --end-date 2026-11-17
+python -m src.ingestion.economic_data --start-date 2020-01-01 --end-date 2026-11-17
+
+# Force a complete U.S. bar refresh instead of downloading only uncovered dates.
+python -m src.ingestion.massive_us --start-date 2026-06-01 --end-date 2026-11-17 --refresh-all
+
+# Populate all six feature datasets with a forced rebuild. Building H1-H3
+# automatically builds daily, us_5min, and anchors first. Outputs are written
+# to data/features/ and data/features/experiments/run_id=baseline-default/.
+python -c "from src.engine.dataset_builder import DatasetBuilder; from src.engine.experiment import ExperimentSpec; b=DatasetBuilder(); b.build(('h1','h2','h3'), experiment=ExperimentSpec(hypothesis='H3', estimator='directional_ecm'), run_id='baseline-default', force=True); b.close()"
+
+# Estimate H1 with BIC-selected ARDL–UECM, finite-sample bounds inference,
+# HAC standard errors, diagnostics, and a Markdown research report.
+python -m src.hypotheses.h1_cointegration --run-id baseline-default
+
+# Example with arbitrary minute horizons. Use a distinct run_id so the baseline
+# experiment remains intact.
+python -c "from src.engine.dataset_builder import DatasetBuilder; from src.engine.experiment import ExperimentSpec; b=DatasetBuilder(); b.build(('h1','h2','h3'), experiment=ExperimentSpec(hypothesis='H3', estimator='directional_ecm', horizons=(7,15,37,60,120)), run_id='custom-horizons'); b.close()"

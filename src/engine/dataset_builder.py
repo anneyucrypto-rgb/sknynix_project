@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import time
 import hashlib
 import json
 from pathlib import Path
@@ -18,7 +19,6 @@ from src.engine.dependency_resolver import resolve_dependencies
 from src.engine.duckdb_engine import DuckDBEngine
 from src.engine.experiment import ExperimentSpec
 from src.engine.feature_registry import FEATURES
-from src.features.anchor_selector import AnchorSpec, select_anchors
 from src.features.contracts import CONTRACTS
 from src.features.price_parity import add_parity_columns
 from src.features.validators import validate_contract, validate_no_lookahead
@@ -251,9 +251,6 @@ class DatasetBuilder:
         frame["valid_quote"] = frame["mid"].gt(0) & frame["spread_bps"].ge(0)
         return frame
 
-    def build_anchors(self, spec: AnchorSpec | None = None) -> pd.DataFrame:
-        return select_anchors(self._require("us_5min"), spec)
-
     @staticmethod
     def _attach_controls(frame: pd.DataFrame, controls: Iterable[str]) -> pd.DataFrame:
         output = frame.copy()
@@ -280,40 +277,172 @@ class DatasetBuilder:
         frame["sample_eligible"] = frame[required].notna().all(axis=1)
         return frame
 
-    def build_h2(self, horizons: Iterable[int] = (5, 10, 15, 30, 45, 60, 100, 120), h1_model_id: str = "theory_parity", h1_intercept: float | None = None, h1_theta: float | None = None, anchor_types: Iterable[str] = ("premarket_dynamic", "regular_0930"), controls: Iterable[str] = ("us_soxx_return", "kr_sector_return")) -> pd.DataFrame:
-        anchors = self._require("anchors").copy()
-        anchors = anchors[anchors["anchor_type"].isin(tuple(anchor_types))]
+    @staticmethod
+    def _asof_prices(
+        events: pd.DataFrame,
+        timestamp_column: str,
+        prices: pd.DataFrame,
+        output_column: str,
+        *,
+        tolerance: str = "60s",
+    ) -> pd.DataFrame:
+        left = events.sort_values(timestamp_column)
+        right = prices.rename(
+            columns={"timestamp": f"{output_column}_ts", "close": output_column}
+        ).sort_values(f"{output_column}_ts")
+        return pd.merge_asof(
+            left,
+            right,
+            left_on=timestamp_column,
+            right_on=f"{output_column}_ts",
+            direction="backward",
+            tolerance=pd.Timedelta(tolerance),
+        ).sort_values("_row_id")
+
+    def _minute_close_series(self, *parts: str) -> pd.DataFrame:
+        frame = self._utc(self._parquet(self._glob(*parts)))[
+            ["timestamp", "close"]
+        ].copy()
+        frame["timestamp"] = frame["timestamp"] + pd.Timedelta(minutes=1)
+        frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
+        return frame.loc[frame["close"].gt(0)].drop_duplicates(
+            "timestamp", keep="last"
+        )
+
+    def _minute_open_series(self, *parts: str) -> pd.DataFrame:
+        frame = self._utc(self._parquet(self._glob(*parts)))[
+            ["timestamp", "open"]
+        ].rename(columns={"open": "close"})
+        frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
+        return frame.loc[frame["close"].gt(0)].drop_duplicates(
+            "timestamp", keep="last"
+        )
+
+    def build_h2(
+        self,
+        horizons: Iterable[int] = (30,),
+        controls: Iterable[str] = ("us_soxx_return", "kr_sector_return"),
+        h1_model_id: str = "theory_parity",
+        h1_intercept: float | None = None,
+        h1_theta: float | None = None,
+        **_: object,
+    ) -> pd.DataFrame:
         horizons = tuple(sorted(set(int(value) for value in horizons)))
-        if not horizons or horizons[0] <= 0:
-            raise ValueError("H2 horizons must be positive")
-        expanded = anchors.loc[anchors["anchor_valid"]].merge(pd.DataFrame({"horizon_min": horizons}), how="cross")
-        expanded["endpoint_ts_utc"] = pd.to_datetime(expanded["anchor_ts_utc"], utc=True) + pd.to_timedelta(expanded["horizon_min"], unit="m")
-        minute = self._utc(self._parquet(self._glob("us", "market", "SKHY_1min")))[["timestamp", "close"]]
-        minute["timestamp"] = minute["timestamp"] + pd.Timedelta(minutes=1)
-        expanded["anchor_price"] = expanded["anchor_trade_usd"]
-        expanded = pd.merge_asof(expanded.sort_values("endpoint_ts_utc"), minute.rename(columns={"timestamp": "outcome_ts", "close": "outcome_price"}), left_on="endpoint_ts_utc", right_on="outcome_ts", direction="backward", tolerance=pd.Timedelta("60s"))
+        if horizons != (30,):
+            raise ValueError("Primary H2 requires fixed 30-minute horizons")
+        if h1_model_id != "theory_parity" and (
+            h1_intercept is None or h1_theta is None
+        ):
+            raise ValueError("estimated H1 ECTs require fixed intercept and theta")
+        base = pd.DataFrame({
+            "date_us": pd.to_datetime(self._require("daily")["date_us"]).dt.date
+        }).merge(pd.DataFrame({
+            "anchor_type": [
+                "fixed_0700", "fixed_0730", "fixed_0800",
+                "fixed_0830", "fixed_0900", "regular_0930",
+            ],
+            "start_clock": ["07:00", "07:30", "08:00", "08:30", "09:00", "09:30"],
+        }), how="cross")
+        local_start = pd.to_datetime(
+            base["date_us"].astype(str) + " " + base["start_clock"]
+        ).dt.tz_localize(NY)
+        base["anchor_ts_utc"] = local_start.dt.tz_convert("UTC")
+        base["endpoint_ts_utc"] = base["anchor_ts_utc"] + pd.Timedelta(minutes=30)
+        base["horizon_min"] = 30
+        base["_row_id"] = np.arange(len(base))
+        for name, parts in {
+            "skhy": ("us", "market", "SKHY_1min"),
+            "soxx": ("us", "market", "SOXX_1min"),
+            "usdkrw": ("fx", "USDKRW_1min"),
+        }.items():
+            base = self._asof_prices(
+                base, "anchor_ts_utc", self._minute_open_series(*parts),
+                f"{name}_anchor_price",
+            )
+            base = self._asof_prices(
+                base, "endpoint_ts_utc", self._minute_close_series(*parts),
+                f"{name}_horizon",
+            )
+        kr = self._parquet(self._glob("korea", "market", "000660_daily")).copy()
+        kr["available_at_utc"] = _utc_ns(
+            pd.to_datetime(pd.to_datetime(kr["date"]).dt.date.astype(str) + " 15:30")
+            .dt.tz_localize(SEOUL)
+        )
+        kr_price = pd.to_numeric(kr.get("adjusted_close", kr["close"]), errors="coerce")
+        kr["kr_close_known"] = kr_price
+        kr["kr_return_known"] = np.log(kr_price).diff()
+        base = pd.merge_asof(
+            base.sort_values("anchor_ts_utc"),
+            kr[["available_at_utc", "kr_close_known", "kr_return_known"]].sort_values("available_at_utc"),
+            left_on="anchor_ts_utc", right_on="available_at_utc", direction="backward",
+        )
         intercept = 0.0 if h1_intercept is None else h1_intercept
         theta = 1.0 if h1_theta is None else h1_theta
-        if h1_model_id != "theory_parity" and (h1_intercept is None or h1_theta is None):
-            raise ValueError("estimated H1 ECTs require h1_intercept and h1_theta")
-        log_kr_anchor = np.log(expanded["kr_close_known"] * 0.1 / expanded["usdkrw_anchor"])
-        expanded["ect_anchor"] = np.log(expanded["anchor_price"]) - intercept - theta * log_kr_anchor
-        expanded["ect_x_liquidity"] = expanded["ect_anchor"] * expanded["liquidity_score"]
-        expanded["adr_return_h"] = np.log(expanded["outcome_price"] / expanded["anchor_price"])
-        h2_daily = self._require("daily").sort_values("date_us").copy()
-        # A same-day SOXX close is not known at a premarket anchor. Use the
-        # last completed U.S. session unless a future intraday control is added.
-        h2_daily["us_sector_return"] = h2_daily["us_sector_return"].shift(1)
-        daily = self._attach_controls(h2_daily, controls)
-        columns = ["date_us", "kr_daily_return_known", *validate_controls(tuple(controls))]
-        expanded = expanded.merge(daily[columns], on="date_us", how="left")
-        expanded["kr_return_known"] = expanded["kr_daily_return_known"]
+        base["ect_anchor"] = (
+            np.log(base["skhy_anchor_price"])
+            - intercept
+            - theta * np.log(base["kr_close_known"] * 0.1 / base["usdkrw_anchor_price"])
+        )
+        base["h1_model_id"] = h1_model_id
+        base["online_eligible"] = True
+        expanded = base.copy()
+        expanded["outcome_ts"] = expanded["skhy_horizon_ts"]
+        expanded["anchor_price"] = expanded["skhy_anchor_price"]
+        expanded["outcome_price"] = expanded["skhy_horizon"]
+        expanded["adr_return_h"] = np.log(
+            expanded["skhy_horizon"] / expanded["skhy_anchor_price"]
+        )
+        expanded["soxx_return_h"] = np.log(
+            expanded["soxx_horizon"] / expanded["soxx_anchor_price"]
+        )
+        expanded["usdkrw_return_h"] = np.log(
+            expanded["usdkrw_horizon"] / expanded["usdkrw_anchor_price"]
+        )
+        expanded["anchor_valid"] = expanded[[
+            "skhy_anchor_price", "soxx_anchor_price", "usdkrw_anchor_price",
+        ]].notna().all(axis=1)
+        expanded["selection_status"] = np.where(
+            expanded["anchor_valid"], "fixed_window", "fixed_window_unavailable"
+        )
+        expanded["anchor_mid_usd"] = expanded["skhy_anchor_price"]
+        expanded["anchor_trade_usd"] = expanded["skhy_anchor_price"]
+        expanded["liquidity_score"] = np.nan
+        expanded["spread_bps"] = np.nan
+        expanded["volume_5min"] = np.nan
+        expanded["trade_count_5min"] = np.nan
+        expanded["quote_updates_5min"] = np.nan
+        expanded["usdkrw_anchor"] = expanded["usdkrw_anchor_price"]
+        expanded["parity_spread_anchor"] = expanded["ect_anchor"]
+        expanded["selection_version"] = "fixed-30m-v1"
+        expanded["ect_x_liquidity"] = np.nan
         expanded["ect_change_h"] = expanded["adr_return_h"]
-        open_ts = pd.to_datetime(expanded["date_us"].astype(str) + " 09:30").dt.tz_localize(NY).dt.tz_convert("UTC")
-        expanded["crosses_open"] = (pd.to_datetime(expanded["anchor_ts_utc"], utc=True) < open_ts) & (expanded["endpoint_ts_utc"] > open_ts)
-        expanded["valid_outcome"] = expanded[["ect_anchor", "anchor_price", "outcome_price"]].notna().all(axis=1) & expanded[["anchor_price", "outcome_price"]].gt(0).all(axis=1)
-        expanded["h1_model_id"] = h1_model_id
-        return expanded
+        open_ts = pd.to_datetime(
+            expanded["date_us"].astype(str) + " 09:30"
+        ).dt.tz_localize(NY).dt.tz_convert("UTC")
+        expanded["crosses_open"] = (
+            expanded["anchor_ts_utc"] < open_ts
+        ) & (expanded["endpoint_ts_utc"] > open_ts)
+        expanded["valid_outcome"] = (
+            expanded["online_eligible"].fillna(False)
+            & expanded[[
+                "ect_anchor", "skhy_anchor_price", "skhy_horizon",
+                "soxx_anchor_price", "soxx_horizon", "usdkrw_anchor_price",
+                "usdkrw_horizon", "kr_return_known",
+            ]].notna().all(axis=1)
+            & expanded[[
+                "skhy_anchor_price", "skhy_horizon", "soxx_anchor_price",
+                "soxx_horizon", "usdkrw_anchor_price", "usdkrw_horizon",
+            ]].gt(0).all(axis=1)
+        )
+
+        # Preserve registered daily controls for H3 and robustness models. The
+        # primary pooled H2 ECM does not use these columns.
+        control_daily = self._require("daily").sort_values("date_us").copy()
+        control_daily["us_sector_return"] = control_daily["us_sector_return"].shift(1)
+        daily = self._attach_controls(control_daily, controls)
+        control_columns = ["date_us", *validate_controls(tuple(controls))]
+        expanded = expanded.merge(daily[control_columns], on="date_us", how="left")
+        return expanded.drop(columns=["_row_id", "start_clock"])
 
     def build_h3(self, h1_model_id: str = "theory_parity", h1_intercept: float | None = None, h1_theta: float | None = None, controls: Iterable[str] = ("us_soxx_return", "kr_sector_return")) -> pd.DataFrame:
         if h1_model_id != "theory_parity" and (h1_intercept is None or h1_theta is None):
@@ -377,7 +506,7 @@ class DatasetBuilder:
         results: dict[str, DatasetBuildResult] = {}
         for name in resolve_dependencies(requested):
             source_digest = snapshot_hash(self._raw_source_paths(name))
-            if experiment is None or name in {"daily", "us_5min", "anchors"}:
+            if experiment is None or name in {"daily", "us_5min"}:
                 experiment_digest = "default"
             elif name == "h1":
                 relevant = {"max_lags": experiment.max_lags, "controls": experiment.controls, "start": str(experiment.start_date), "end": str(experiment.end_date)}
@@ -385,7 +514,11 @@ class DatasetBuilder:
             else:
                 experiment_digest = experiment.fingerprint
             cache_key = self.cache.key(name, FEATURES[name].version, source_digest, experiment_digest)
-            model_run = (run_id or experiment.fingerprint) if experiment and name in {"h1", "h2", "h3"} else None
+            model_run = (
+                (run_id or experiment.fingerprint)
+                if experiment and name in {"h1", "h2", "h3"}
+                else None
+            )
             cache_slot = f"{name}:{model_run}" if model_run else name
             output = self.cache.output_path(name, model_run)
             if materialize and not force and self.cache.is_valid(cache_slot, cache_key):
@@ -398,12 +531,21 @@ class DatasetBuilder:
                 continue
             kwargs: dict[str, object] = {}
             if experiment and name == "h1": kwargs.update(max_lags=experiment.max_lags, controls=experiment.controls)
-            if experiment and name == "h2": kwargs.update(horizons=experiment.horizons, h1_model_id=experiment.h1_model_id, h1_intercept=experiment.h1_intercept, h1_theta=experiment.h1_theta, anchor_types=experiment.anchors, controls=experiment.controls)
+            if experiment and name == "h2": kwargs.update(
+                horizons=experiment.horizons,
+                controls=experiment.controls,
+                h1_model_id=experiment.h1_model_id,
+                h1_intercept=experiment.h1_intercept,
+                h1_theta=experiment.h1_theta,
+            )
             if experiment and name == "h3": kwargs.update(h1_model_id=experiment.h1_model_id, h1_intercept=experiment.h1_intercept, h1_theta=experiment.h1_theta, controls=experiment.controls)
             print(f"[build] {name}: starting", flush=True)
             frame = getattr(self, FEATURES[name].builder)(**kwargs)
             if experiment and name in {"h1", "h2", "h3"}:
-                date_column = "target_session_date" if name == "h3" else "date_us"
+                date_column = (
+                    "target_session_date" if name == "h3"
+                    else "date_us"
+                )
                 dates = pd.to_datetime(frame[date_column]).dt.date
                 if experiment.start_date:
                     frame = frame.loc[dates >= experiment.start_date].copy()
@@ -411,7 +553,8 @@ class DatasetBuilder:
                 if experiment.end_date:
                     frame = frame.loc[dates <= experiment.end_date].copy()
             validate_contract(frame, name)
-            if name in {"daily", "us_5min", "h2", "h3"}: validate_no_lookahead(frame, name)
+            if name in {"daily", "us_5min", "h2", "h3"}:
+                validate_no_lookahead(frame, name)
             self.frames[name] = frame
             output = None
             if materialize:

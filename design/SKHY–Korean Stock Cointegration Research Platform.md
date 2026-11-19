@@ -1,9 +1,9 @@
 # **SKHY–Korean Stock Cointegration Research Platform**
 
-Consolidated Implementation Design · Version 4.0 · November 2026
+Consolidated Implementation Design · Version 5.0 · November 2026
 
 **Technology:** Python · DuckDB · Parquet · SQL · Statsmodels · Streamlit
-**Research methodology:** ARDL Bounds Testing · Unrestricted Error-Correction Models · Conditional ECM · Directional Price Adjustment
+**Research methodology:** Full-Sample ARDL Bounds Testing · Fixed Thirty-Minute Horizon ECMs · Directional Price Adjustment
 **Primary output:** Reproducible Markdown research reports with statistical tests, diagnostics, and conclusions.
 
 ## **1. Research objectives and design principles**
@@ -15,7 +15,7 @@ The SEC prospectus specifies that one SKHY ADS represents **0.1** Korean ordinar
 | Hypothesis                          | Research question                                            | Main econometric method                |
 | ----------------------------------- | ------------------------------------------------------------ | -------------------------------------- |
 | **H1: Long-run cointegration**      | Do FX-adjusted Korean shares and SKHY maintain a statistically supported long-run price equilibrium? | Daily ARDL–UECM bounds test            |
-| **H2: Error correction**            | Does SKHY adjust toward equilibrium after a liquidity-qualified premarket or regular-market anchor, and at what speed? | Daily ECM and intraday conditional ECM |
+| **H2: Error correction**            | During which fixed 30-minute window from 7:00 to 10:00 a.m. ET does SKHY adjust most strongly toward equilibrium? | Six full-sample ECMs with BIC lag selection and horizon-level multiplicity control |
 | **H3: Directional price discovery** | Does equilibrium adjustment occur predominantly in SKHY or in the subsequent Korean trading session? | Two direction-specific ECMs            |
 
 No Granger causality tests are included.
@@ -24,12 +24,9 @@ No Granger causality tests are included.
 
 | Component                       | Requirement                                                 |
 | ------------------------------- | ----------------------------------------------------------- |
-| Premarket start                 | 7:00 a.m. U.S. Eastern                                      |
-| Dynamic anchor search           | 7:00–9:20 a.m. ET                                           |
-| Premarket execution eligibility | Subject to Schwab's 7:00–9:25 a.m. window                   |
-| Fixed comparison anchor         | 9:30 a.m. ET                                                |
-| Default horizons                | 5, 10, 15, 30, 45, 60, 100, 120 minutes                     |
-| Horizon flexibility             | Arbitrary supported minute intervals through SQL parameters |
+| H2 fixed windows                | 7:00–7:30, 7:30–8:00, 8:00–8:30, 8:30–9:00, 9:00–9:30, 9:30–10:00 ET |
+| H2 response horizon             | Six fixed 30-minute intervals per eligible date             |
+| H1/H2 estimation window         | Complete available sample; no rolling-forward re-estimation |
 | Korean underlying data          | Daily, with optional intraday support in future             |
 | U.S. ADR data                   | Raw trades, quotes, one-minute and five-minute bars         |
 | Data storage                    | Parquet                                                     |
@@ -99,10 +96,10 @@ skhynix_project/
 │   ├── features/                  # Reusable derived datasets
 │   │   ├── daily/
 │   │   ├── us_5min/
-│   │   ├── anchors/
 │   │   └── experiments/
 │   │       └── run_id=.../
-│   │           └── model_data.parquet
+│   │           ├── h1.parquet
+│   │           └── h2.parquet
 │   │
 │   └── research.duckdb
 │
@@ -117,7 +114,6 @@ skhynix_project/
 │   │   ├── daily_prices.sql
 │   │   ├── parity.sql
 │   │   ├── liquidity_5min.sql
-│   │   ├── anchor_candidates.sql
 │   │   ├── intraday_returns.sql
 │   │   └── fx_volatility.sql
 │   │
@@ -138,7 +134,6 @@ skhynix_project/
 │   └── diagnostics/
 │       ├── missingness.sql
 │       ├── coverage.sql
-│       └── anchor_quality.sql
 │
 ├── src/
 │   ├── config.py                  # Typed Python settings
@@ -161,17 +156,12 @@ skhynix_project/
 │   │   └── cache_manager.py
 │   │
 │   ├── features/
-│   │   ├── anchor_selector.py
 │   │   ├── price_parity.py
 │   │   ├── contracts.py
 │   │   └── validators.py
 │   │
 │   ├── hypotheses/
-│   │   ├── base.py
-│   │   ├── registry.py
-│   │   ├── h1_cointegration.py
-│   │   ├── h2_error_correction.py
-│   │   └── h3_price_discovery.py
+│   │   └── overnight_ablation.py   # Retained bivariate H1 and SOXX-gauge H2
 │   │
 │   ├── econometrics/
 │   │   ├── ardl.py
@@ -232,18 +222,17 @@ Use three storage layers:
 
 All timestamps should be UTC-aware. Maintain a separate U.S. trading-session date using `America/New_York` and Korean session date using `Asia/Seoul`.
 
-### **4.1 Six principal research datasets**
+### **4.1 Five principal research datasets**
 
 | Dataset   | Row granularity                         | Primary content                                              | Consumer          |
 | --------- | --------------------------------------- | ------------------------------------------------------------ | ----------------- |
 | `daily`   | One paired U.S. trading session         | ADR close, last known Korean close, FX, market controls      | H1 and H3         |
-| `us_5min` | One completed SKHY five-minute interval | OHLCV, quotes, spreads, volume, FX, known Korean reference   | Anchor engine, H2 |
-| `anchors` | One date × anchor type                  | Selected time, price, spread, liquidity score, validity      | H2 and H3         |
+| `us_5min` | One completed SKHY five-minute interval | OHLCV, quotes, spreads, volume, FX, known Korean reference   | Reusable market-quality analysis |
 | `h1`      | One eligible daily observation          | Price levels, differences, lags, selected controls           | ARDL–UECM         |
-| `h2`      | One date × anchor × horizon             | Initial ECT, liquidity, future ADR return                    | Conditional ECM   |
+| `h2`      | One date × one of six fixed 30-minute windows | Full-sample H1 ECT and synchronized SKHY, SOXX and FX returns | Primary H2 comparison |
 | `h3`      | One directional target observation      | Pre-response ECT, completed source-market return, target-market return | Directional ECM   |
 
-The first three are reusable foundation datasets. The last three should normally be **SQL-generated views**, optionally materialized in versioned Parquet for a particular experiment.
+The first two are reusable foundation datasets. Model-specific datasets are materialized in versioned Parquet under the retained experiment run directory.
 
 ### `daily` **— canonical daily research view**
 
@@ -301,31 +290,6 @@ Bars are keyed by `(symbol, bar_end_utc)` if the platform later includes more se
 
 Preserve the underlying one-minute observations. A future seven-minute or 37-minute response horizon cannot be measured precisely from five-minute bars alone.
 
-### `anchors` **— selection-event dataset**
-
-Primary fields:
-
-```
-date_us                 DATE
-anchor_type             VARCHAR
-anchor_ts_utc           TIMESTAMPTZ
-anchor_valid            BOOLEAN
-selection_status        VARCHAR
-anchor_mid_usd          DOUBLE
-anchor_trade_usd        DOUBLE
-liquidity_score         DOUBLE
-spread_bps              DOUBLE
-volume_5min             BIGINT
-trade_count_5min        BIGINT
-quote_updates_5min      BIGINT
-kr_close_known          DOUBLE
-usdkrw_anchor           DOUBLE
-parity_spread_anchor    DOUBLE
-selection_version       VARCHAR
-```
-
-Each day contains a dynamic-anchor record and a fixed-opening record. Invalid anchors remain in the data with null observation fields and explicit status codes.
-
 ### `h1` **— daily cointegration dataset**
 
 Primary fields:
@@ -346,30 +310,42 @@ sample_eligible         BOOLEAN
 
 The SQL engine generates lag columns according to the selected ARDL specification. Unused lags are not generated unnecessarily.
 
-### `h2` **— anchor × horizon observations**
+### `H1_long_run_coefficients.parquet` **— fixed full-sample equilibrium**
+
+Primary fields:
+
+```
+parameter                  VARCHAR
+estimate                   DOUBLE
+std_error                  DOUBLE
+p_value                    DOUBLE
+q_value                    DOUBLE
+conf_low                   DOUBLE
+conf_high                  DOUBLE
+```
+
+The artifact contains the intercept and slope from the single H1 model estimated on the complete sample. H2 uses these same values for every date.
+
+### `h2` **— primary fixed-window H2 observations**
 
 Primary fields:
 
 ```
 date_us                 DATE
-anchor_type             VARCHAR
+anchor_type             VARCHAR  -- regular_0930
 anchor_ts_utc           TIMESTAMPTZ
-horizon_min             INTEGER
-endpoint_ts_utc         TIMESTAMPTZ
-ect_anchor              DOUBLE
-liquidity_score         DOUBLE
-ect_x_liquidity         DOUBLE
-spread_bps              DOUBLE
-kr_return_known         DOUBLE
-[selected controls]     DOUBLE
+horizon_min             INTEGER  -- 30
+endpoint_ts_utc         TIMESTAMPTZ  -- 10:00 ET
 adr_return_h            DOUBLE
-ect_change_h            DOUBLE
-crosses_open            BOOLEAN
-valid_outcome           BOOLEAN
+soxx_return_h           DOUBLE
+usdkrw_return_h         DOUBLE
+ect_anchor              DOUBLE
+kr_return_known         DOUBLE
 h1_model_id             VARCHAR
+valid_outcome           BOOLEAN
 ```
 
-One day can generate up to 16 default horizon observations if both anchors and all eight endpoints are valid.
+The dependent variable is the SKHY log return from 9:30 to 10:00 a.m. ET. `ect_anchor` uses the fixed full-sample H1 intercept and slope.
 
 ### `h3` **— directional observations**
 
@@ -486,98 +462,15 @@ Every economic-control observation must distinguish:
 | `series_id`        | Stable economic-series identifier     |
 | `source_version`   | Downloaded data snapshot              |
 
-For example, a U.S. CPI figure released at 8:30 a.m. ET may be included in a 9:00 a.m. experiment, but it must not appear in features for a 7:45 a.m. anchor on the same day.
+For example, a U.S. CPI figure released at 8:30 a.m. ET may be included in the 9:00–9:30 window, but it must not appear in features for an earlier window on the same day.
 
 This rule applies equally to Korean macroeconomic releases, U.S. market indices, FX, and other controls.
-
-## **6. Dynamic premarket anchor engine**
-
-The anchor engine should be independent of H1, H2, and H3. Future hypotheses may reuse its output without modifications.
-
-### **6.1 Selection algorithm**
-
-At each U.S. trading date \(d\), use completed five-minute SKHY bars ending between 7:05 and 9:20 a.m. ET.
-
-Calculate a market-quality score from:
-
-\[ \mathbf L_{d,t}= \left[ Volume,\ TradeCount,\ QuoteUpdates,\ Spread,\ QuoteCoverage,\ QuoteAge \right] \]
-
-Optional features include displayed bid/ask sizes, dollar volume, and price-impact proxies.
-
-A bar qualifies only when minimum trade and quote conditions are met. To avoid isolated liquidity spikes, require two consecutive qualifying bars.
-
-\[ \boxed{ t_d^*= \min\left\{ t\le09{:}20: Q_{d,t}=1,\ Q_{d,t-5}=1 \right\} } \]
-
-The first possible confirmed anchor is 7:10 a.m.
-
-### **6.2 Division of responsibility**
-
-| Module                  | Responsibility                                               |
-| ----------------------- | ------------------------------------------------------------ |
-| `liquidity_5min.sql`    | Compute volume, trade count, spreads, quote coverage         |
-| `anchor_candidates.sql` | Produce candidate bars and historical standardized features  |
-| `anchor_selector.py`    | Apply causal stopping rule and select earliest qualifying time |
-| `feature_registry.py`   | Register `anchors` as a reusable feature                     |
-| `anchor_quality.sql`    | Summarize anchor coverage and quality                        |
-
-The historical liquidity thresholds should be calculated from prior trading days only, ideally by time-of-day bucket.
-
-The selection engine should never choose the highest-volume interval retrospectively using later observations.
-
-### **6.3 Missing and illiquid days**
-
-The anchor engine must preserve:
-
-- Valid dynamic anchor.
-- No qualifying dynamic anchor.
-- Invalid or missing quotes.
-- Missing trades.
-- Incomplete historical liquidity baseline.
-- Fixed-opening anchor unavailable or stale.
-
-These statuses become research features as well as data-quality indicators.
-
-For example, a future H4 model could examine whether no-anchor days predict lower liquidity or more extreme volatility at the regular open.
-
-### **6.4 Anchor configuration**
-
-Use Python rather than YAML:
-
-```
-from dataclasses import dataclass
-
-
-@dataclass(frozen=True)
-class AnchorSpec:
-    start_et: str = "07:00"
-    cutoff_et: str = "09:20"
-    fixed_open_et: str = "09:30"
-
-    bar_minutes: int = 5
-    consecutive_bars: int = 2
-
-    min_trades: int = 10
-    min_volume: int = 1000
-    min_quote_updates: int = 10
-
-    max_spread_bps: float = 100.0
-    min_quote_coverage: float = 0.80
-    max_quote_age_seconds: float = 30.0
-
-    history_days: int = 20
-    min_history_days: int = 10
-    volume_percentile: float = 0.60
-
-    min_liquidity_score: float = 0.0
-```
-
-These thresholds are initial research parameters, not validated empirical estimates for SKHY. Their values should be tested against historical data quality, and the chosen version must be saved with every experiment.
 
 ## **7. SQL-driven feature engine**
 
 The engine must support two types of change:
 
-1. **Parameter changes:** Change horizons, anchors, control selection, lags, or sample periods without editing SQL files.
+1. **Parameter changes:** Change fixed windows, control selection, lags, or sample periods without editing SQL files.
 2. **Feature-definition changes:** Add a new SQL transformation or input source, register it, and rebuild only affected dependencies.
 
 ### **7.1 Feature registration**
@@ -619,16 +512,8 @@ FEATURES = {
         ),
     ),
 
-    "anchors": FeatureSpec(
-        name="anchors",
-        sql_path="sql/features/anchor_candidates.sql",
-        grain="us_session_anchor",
-        dependencies=("us_5min",),
-    ),
 }
 ```
-
-For the anchor feature, the registry must declare that SQL generates the candidates and `anchor_selector.py` applies the selection rule. A general feature definition can therefore specify both an SQL transform and an optional Python postprocessor.
 
 ### **7.2 Control registry**
 
@@ -688,85 +573,9 @@ The control registry describes availability and alignment rules. The feature eng
 
 Adding a control already in the registry requires only including its identifier in the experiment specification.
 
-### **7.3 Parameterized horizon SQL**
+### **7.3 Six fixed 30-minute windows**
 
-The system should not hardcode eight prediction horizons.
-
-Instead, define:
-
-\[ \mathcal H=\{h_1,h_2,\ldots,h_n\} \]
-
-and generate future endpoints from the requested horizons.
-
-```
--- sql/datasets/h2_anchor_horizons.sql
-
-WITH requested_horizons AS (
-    SELECT UNNEST($horizons::INTEGER[]) AS horizon_min
-),
-
-requests AS (
-    SELECT
-        a.date_us,
-        a.anchor_type,
-        a.anchor_ts_utc,
-        a.anchor_mid_usd,
-        a.ect_anchor,
-        h.horizon_min,
-
-        a.anchor_ts_utc
-            + h.horizon_min * INTERVAL '1 minute'
-            AS target_ts_utc
-
-    FROM feature_anchors a
-    CROSS JOIN requested_horizons h
-
-    WHERE a.anchor_valid
-),
-
-endpoints AS (
-    SELECT
-        r.*,
-        p.ts_utc AS endpoint_ts_utc,
-        p.mid_usd AS endpoint_mid_usd
-
-    FROM requests r
-
-    ASOF LEFT JOIN core_us_prices_1min p
-      ON r.date_us = p.date_us
-     AND r.target_ts_utc >= p.ts_utc
-)
-
-SELECT
-    *,
-    CASE
-        WHEN endpoint_mid_usd > 0
-         AND endpoint_ts_utc >=
-             target_ts_utc - INTERVAL '60 seconds'
-        THEN LN(endpoint_mid_usd / anchor_mid_usd)
-        ELSE NULL
-    END AS adr_return_h
-
-FROM endpoints;
-```
-
-The example uses the latest valid endpoint price no later than the requested horizon. Its maximum permitted staleness is 60 seconds, subject to calibration.
-
-For a strict exact-horizon study, the system should instead require a quote at the requested endpoint or within a separately documented tolerance.
-
-The production query must also check session eligibility and opening-boundary crossings.
-
-### **Result**
-
-Changing the horizons to:
-
-```
-horizons = (5, 10, 20, 40, 90, 180)
-```
-
-requires no change to the SQL transformation itself.
-
-As long as the underlying one-minute or tick data cover the requested endpoints, the new feature dataset can be generated immediately.
+The primary H2 feature builder constructs synchronized SKHY, SOXX, and USDKRW returns for six fixed 30-minute windows from 7:00 through 10:00 a.m. ET. Each row requires prices at the exact start and end boundaries. Missing endpoints remain invalid rather than being replaced by a stale observation. The production H2 run sets `horizons=(30,)`; the six pre-specified window identifiers determine the timing comparison.
 
 ## **8. Hypothesis engine: independent models, shared features**
 
@@ -840,10 +649,27 @@ The economically motivated parity restriction is:
 
 Controls \(Z_d\) should initially be included as stationary short-run or predetermined regressors, not indiscriminately added to the cointegrating vector.
 
-### **9.2 H1 pipeline**
+The H1 long-run equilibrium is always bivariate. Rolling lag selection may choose the autoregressive and distributed lag orders, but it may not remove `log_kr_usd` from the level relationship.
+
+### **9.2 Full-sample H1 coefficient artifact**
+
+Estimate H1 once on all complete historical observations. BIC selects the ARDL orders, after which the UECM bounds test and long-run coefficient transformation produce \(\hat c\), \(\hat\theta\), and the daily adjustment coefficient.
+
+Write the fixed long-run coefficients to `h1_model.parquet`. The retained H2
+equilibrium error is known before the current U.S. opening:
+
+\[
+ECT_d=\log(P^{SKHY}_{d-1,close})
+-\hat c-\hat\theta\log(P^{KR,USD}_d).
+\]
+
+The same \(\hat c\) and \(\hat\theta\) apply to every H2 date. H1 supplies the
+equilibrium benchmark; H2 uses it to forecast the overnight return.
+
+### **9.3 H1 pipeline**
 
 ```
-src/hypotheses/h1_cointegration.py
+src/hypotheses/overnight_ablation.py
 class H1Cointegration(BaseHypothesis):
 
     hypothesis_id = "H1"
@@ -872,7 +698,7 @@ class H1Cointegration(BaseHypothesis):
 
 The supporting econometric library should contain the actual implementations. Hypothesis classes should orchestrate reusable functions, not duplicate statistical formulas.
 
-### **9.3 Required H1 results**
+### **9.4 Required H1 results**
 
 | Category                   | Results                                                      |
 | -------------------------- | ------------------------------------------------------------ |
@@ -893,70 +719,64 @@ The attached paper motivates ARDL bounds testing for \(I(0)\)/\(I(1)\) variables
 
 The system must also record whether valid cointegration evidence was obtained. If H1 is inconclusive, H2/H3 can still investigate adjustments to theoretical parity, but must not present that analysis as a validated cointegration-based ECM.
 
-## **10. H2 — Error-correction analysis**
+## **10. H2 — Retained overnight error-correction forecast**
 
-H2 consists of two estimation families.
+### **10.1 Target and cutoff**
 
-### **10.1 H2-A: Daily ECM**
+The only retained H2 target is the full SKHY previous-close-to-09:30-open log
+return:
 
-Estimate the daily restricted ECM associated with the accepted long-run relationship:
+\[
+r^{ON}_{d}=\log(P^{SKHY}_{d,09{:}30\ open}/P^{SKHY}_{d-1,close}).
+\]
 
-\[ \boxed{ \Delta a_d= c+\lambda_AECT_{d-1} +\sum_i\phi_i\Delta a_{d-i} +\sum_j\gamma_j\Delta k_{d-j} +\delta^\top Z_d+\varepsilon_d } \]
+The forecast is frozen at 09:25 ET. H2 uses the completed Korean daytime
+return, the previous-close H1 equilibrium error, the SOXX prior-close-to-07:00
+return, and the SOXX 07:00-to-09:25 return.
 
-The key result is \(\lambda_A\), with expected convergence sign:
+### **10.2 Final H2 equation**
 
-\[ \lambda_A<0 \]
+\[
+\boxed{
+\widehat r^{ON}_d=
+0.005001
++0.340554r^{KR,day}_d
+-0.226168ECT_d
++0.779940r^{SOXX,close\rightarrow07{:}00}_d
++1.184007r^{SOXX,07{:}00\rightarrow09{:}25}_d
+}
+\]
 
-Report its confidence interval, p-value, and any meaningful implied adjustment half-life.
+Return forecasting uses H2, not H1 directly. H1 estimates \(\hat c\) and
+\(\hat\theta\); H2 combines the resulting ECT with current Korean and SOXX
+information. BIC selected \(p=0,q=0\), so no lagged return or lagged-gauge
+terms enter the retained equation.
 
-### **10.2 H2-B: Dynamic-anchor horizon response**
+### **10.3 Retained results**
 
-For each dynamically selected premarket anchor \(t_d^*\) and fixed 9:30 benchmark:
+| Measure | Result |
+| --- | ---: |
+| Complete observations | 88 |
+| Expanding-window forecasts | 48 |
+| RMSE | 0.012906 |
+| MAE | 0.010055 |
+| Directional accuracy | 95.8% |
+| OOS \(R^2\) versus zero | 0.8930 |
+| H2 adjustment coefficient | −0.226168 |
+| H2 adjustment p-value | \(8.63\times10^{-7}\) |
 
-\[ \boxed{ \begin{aligned} R^A_{d,h}={}&\alpha_h+\lambda_hECT_{d,t_d^*}\\ &+\beta_h LS_{d,t_d^*}\\ &+\gamma_h(ECT_{d,t_d^*}\times LS_{d,t_d^*})\\ &+\boldsymbol\delta_h^\top Z_{d,t_d^*}+\varepsilon_{d,h} \end{aligned} } \]
+The negative, highly significant adjustment coefficient supports overnight
+movement toward the bivariate H1 equilibrium. Forecast validation re-estimates
+H2 on expanding samples containing only observations before each prediction.
 
-This allows the study to investigate both error-correction behavior and its relationship with liquidity.
+### **10.4 Executable strategy**
 
-The H2 estimator should receive the horizons and controls through an `ExperimentSpec`.
-
-```
-H2_SPEC = ExperimentSpec(
-    hypothesis="H2",
-    estimator="conditional_ecm",
-    anchors=("dynamic", "fixed_0930"),
-    horizons=(5, 10, 15, 30, 45, 60, 100, 120),
-    controls=(
-        "us_soxx_return",
-        "kr_sector_return",
-        "fx_volatility",
-    ),
-)
-```
-
-This is an illustrative specification; the full dataclass and defaults are defined in `src/engine/experiment.py`.
-
-### **H2 diagnostic requirements**
-
-In addition to the paper-derived residual tests, include checks specific to the dynamic anchor:
-
-| Diagnostic                       | Required analysis                                            |
-| -------------------------------- | ------------------------------------------------------------ |
-| Anchor coverage                  | Percentage of dates with valid premarket anchors             |
-| Anchor distribution              | Median, quantiles, and range of selected ET times            |
-| Liquidity quality                | Selected volume, spread, trade count, quote coverage         |
-| Horizon completeness             | Number of valid observations by horizon                      |
-| Time-of-day sensitivity          | Does adjustment depend on how close the anchor is to 9:30?   |
-| Premarket versus regular session | Separately estimate outcomes crossing the opening            |
-| Inference                        | Heteroskedasticity/serial-dependence robust confidence intervals |
-| Multiple testing                 | Adjust across horizon families                               |
-| Parameter stability              | Rolling estimates, CUSUM/CUSUMSQ where applicable            |
-
-The full H2 analysis must distinguish two types of coefficients:
-
-- The daily restricted ECM adjustment coefficient measures adjustment per daily observation.
-- The intraday horizon coefficient measures cumulative conditional response over \(h\) minutes.
-
-They should not be reported as if they were the same statistical quantity.
+The trading strategy retains the 09:25-to-open design. It enters at the 09:25
+SKHY premarket open, applies protective stop-loss/take-profit rules through
+09:27, submits an opposite-side MOO before 09:28 for survivors, and exits at
+09:30. It credits only the 09:25–09:30 return. Transaction costs, slippage,
+square-root impact, volatility-scaled sizing, and drawdown controls are
+included. Full execution details are in `design/BACKTEST_DESIGN.md`.
 
 ## **11. H3 — Directional price-discovery analysis**
 
@@ -1075,10 +895,7 @@ class ExperimentSpec:
     start_date: str
     end_date: str
 
-    anchors: tuple[str, ...] = ("dynamic", "fixed_0930")
-    horizons: tuple[int, ...] = (
-        5, 10, 15, 30, 45, 60, 100, 120
-    )
+    horizons: tuple[int, ...] = (30,)
 
     controls: tuple[str, ...] = ()
     max_lags: int = 2
@@ -1106,12 +923,12 @@ class ResearchConfig:
     anchor: AnchorSpec = field(default_factory=AnchorSpec)
 
     default_horizons: tuple[int, ...] = (
-        5, 10, 15, 30, 45, 60, 100, 120
+        30, 40, 50, 60, 70, 80, 90
     )
 ``
 ```
 
-The specification must be validated before execution. A requested control must exist in the registry, a horizon must be positive, and no evaluation observation may occur before the necessary training history.
+The specification must be validated before execution. A requested control must exist in the registry, every H2 horizon must be a positive multiple of ten, and no evaluation observation may occur before the necessary training history.
 
 ### **13.2 Model registry**
 
@@ -1167,7 +984,7 @@ It receives a structured `ModelResult` and renders a report using Jinja2 templat
 | Report                   | Content                                                      |
 | ------------------------ | ------------------------------------------------------------ |
 | `H1_cointegration.md`    | Integration tests, lag selection, ARDL bounds, long-run coefficients, restrictions, diagnostics |
-| `H2_error_correction.md` | Daily ECM, intraday horizon coefficients, anchor performance, liquidity interaction, diagnostics |
+| `H2_error_correction.md` | Six fixed-window ECMs, per-window BIC lag selection, HAC inference, multiplicity adjustment, and selected horizon |
 | `H3_price_discovery.md`  | Korea-to-U.S. and U.S.-to-Korea adjustment, uncertainty, comparative interpretation |
 | `Research_Summary.md`    | Integrated hypothesis decisions, key estimates, diagnostic status, limitations |
 
@@ -1190,7 +1007,7 @@ The values below are placeholders, not empirical findings.
 
 Every test should be accompanied by its null hypothesis, effective sample size, statistical interpretation, and appropriate warnings.
 
-H2 reports must additionally document the number of valid dynamic anchors, their time distribution, and the number of available endpoint observations for each horizon.
+H2 reports must additionally document valid observations for every fixed window and the multiplicity-adjusted result across all six windows.
 
 ### **Report versioning**
 
@@ -1358,9 +1175,7 @@ def run_experiment(spec):
 
 The called helper functions are interfaces to be implemented in their corresponding modules.
 
-The production engine must resolve the H1 dependency **before** constructing the final H2/H3 model dataset whenever an estimated ECT is required.
-
-A valid H1 model reference should include the coefficient version, training cutoff, estimation sample, and cointegration decision. If the H1 relationship is not statistically supported, the user should explicitly select a theory-constrained parity model rather than silently treating an estimated ECT as validated.
+The production engine must estimate `h1` and write the fixed long-run coefficient artifact before estimating H2. If H1 is not statistically supported, H2 must be described as an estimated-equilibrium exercise rather than a validated cointegration ECM.
 
 ### **Running from the command line**
 
@@ -1389,15 +1204,14 @@ The test suite should validate data integrity, feature generation, econometric c
 | Price parity           | Correct 0.1 ordinary-share-per-ADS conversion                |
 | Time alignment         | No observation is used before its availability timestamp     |
 | Korean daily reference | No invented Korean five-minute observations                  |
-| Premarket selection    | Start 7:00; earliest qualified anchor 7:10 under two-bar rule |
-| Anchor cutoff          | No dynamic anchor after 9:20 ET                              |
-| Fixed opening          | 9:30 observation follows a documented quote/trade convention |
-| Arbitrary horizons     | New horizons can be generated from raw minute/tick data      |
+| Fixed H2 alignment    | SKHY, SOXX and USDKRW use identical boundaries within each of the six windows |
+| Full-sample H1        | One reproducible coefficient artifact is used by every H2 row |
+| Secondary horizons    | Requested cumulative endpoints are generated independently from raw minute data |
 | Macro controls         | Correct release-time and historical-vintage alignment        |
 | Feature registry       | Registered dependencies resolve without circular relationships |
 | Model registry         | SQL, inputs, parameters, and estimator versions are preserved |
 | H1 ARDL                | Appropriate integration orders, bounds cases, coefficient restrictions |
-| H2 ECM                 | Correct ECT timing, horizon endpoints, interaction terms     |
+| H2 ECM                 | Fixed full-sample ECT, BIC-selected p/q orders, and HAC inference |
 | H3 ECM                 | Correct next Korean session and pre-session controls         |
 | Diagnostics            | Test statistics reproduce validated reference cases          |
 | Markdown               | Every report includes specifications, test statistics, decisions, and limitations |
@@ -1415,9 +1229,9 @@ Tests should also verify the behavior of missing data, insufficient sample sizes
 
    Implement DuckDB registration, SQL views, point-in-time joins, feature registry, control registry, and dependency resolution.
 
-3. **Market alignment and anchors**
+3. **Market alignment and fixed windows**
 
-   Generate `daily`, `us_5min`, and `anchors` datasets. Validate quote quality, 7:00–9:20 selection, and the 9:30 benchmark.
+   Generate `daily` and `us_5min`, then validate exact one-minute endpoints for all six fixed 30-minute windows.
 
 4. **H1 estimation and statistical diagnostics**
 
@@ -1425,7 +1239,7 @@ Tests should also verify the behavior of missing data, insufficient sample sizes
 
 5. **H2 and H3**
 
-   Generate arbitrary horizon responses and directional datasets; estimate conditional and daily ECMs using versioned H1 coefficients.
+   Estimate H1 once on the complete sample, materialize its fixed long-run coefficients, and estimate six fixed-window H2 equations with BIC-selected p/q orders and horizon-level multiplicity control.
 
 6. **Experiment management and Streamlit**
 
@@ -1441,10 +1255,10 @@ Tests should also verify the behavior of missing data, insufficient sample sizes
 | Query engine         | DuckDB                                                       |
 | Macro controls       | Extensible, vintage-aware registry                           |
 | Horizons             | Parameterized, calculated from one-minute or finer observations |
-| Premarket anchors    | Liquidity-adaptive from 7:00 to 9:20 ET                      |
+| H2 timing windows    | Six fixed 30-minute windows from 7:00 to 10:00 ET            |
 | Model configuration  | Python dataclasses                                           |
 | H1 methodology       | Daily ARDL–UECM bounds and finite-sample inference           |
-| H2 methodology       | Daily ECM and dynamic-anchor intraday adjustment             |
+| H2 methodology       | Full-sample H1 with six fixed 30-minute adjustment equations |
 | H3 methodology       | Direction-specific ECM, no Granger tests                     |
 | Diagnostics          | Paper-derived tests plus robustness and mixed-frequency validation |
 | Research output      | Versioned Markdown reports                                   |

@@ -1,9 +1,9 @@
 # Missing, limited, and unbuilt datasets
 
-Inventory date: 2026-11-17
+Inventory date: 2026-11-19
 
 Previously missing downloadable controls have now been populated. The engine
-and all six baseline feature datasets are implemented and materialized.
+and the retained overnight feature dataset is implemented and materialized.
 Remaining gaps are raw-data coverage, limited sample size, point-in-time
 release metadata, unavailable direct Korean macro data, and the unbuilt
 standardized core layer.
@@ -17,6 +17,12 @@ standardized core layer.
 | Overlapping FX history | USD/KRW covers 2024-11-17 through 2026-11-16 UTC, while 000660 and controls begin in 2020 | Enforce the actual SKHY–000660–FX intersection in coverage diagnostics |
 | U.S. inflation release timing | The monthly inflation file has an observation `date` but no `release_timestamp` | Add a verified release timestamp before using CPI/PCE in intraday point-in-time models |
 | Optional Korean underlying intraday data | Only daily 000660 is part of the baseline design | Acquire only if a future intraday Korean specification is activated |
+
+SKHY ticker-news sentiment is present through 2026-11-17. Massive updates the
+endpoint hourly and does not provide a historical ingestion timestamp, so
+`published_utc` must not be interpreted as proof that the LLM insight was
+tradable at that exact time. New downloads preserve `received_at_utc` for
+forward use.
 
 The most important issue is statistical rather than a missing filename: the
 current H1 common window begins on 2026-07-13. A short sample may be unsuitable
@@ -67,38 +73,27 @@ the complete target architecture.
 
 | Unbuilt dataset | Expected path | Needed by |
 | --- | --- | --- |
-| Standardized U.S. trades | `core/us_trades/` | H2 liquidity and execution checks |
-| Standardized U.S. quotes | `core/us_quotes/` | H2 dynamic anchor selection |
+| Standardized U.S. trades | `core/us_trades/` | Optional future microstructure analysis |
+| Standardized U.S. quotes | `core/us_quotes/` | Optional future microstructure analysis |
 | Standardized U.S. minute prices | `core/us_prices_1min/` | H1 aggregation and H2/H3 returns |
 | Standardized Korean daily prices | `core/kr_daily/` | H1–H3 |
 | Standardized FX observations | `core/fx_quotes/` | Parity and FX-adjusted Korean prices |
 | Standardized economic observations | `core/economic_observations/` | Conditional H2/H3 specifications |
 
-## Materialized baseline feature datasets
-
-The forced `baseline-default` build completed successfully. These counts are
-the current materialized inventory, not claims of econometric adequacy.
+## Materialized retained-model datasets
 
 | Dataset | Path | Current status |
 | --- | --- | --- |
-| Daily parity and controls | `features/daily/part-00000.parquet` | Present: 90 rows |
-| U.S. five-minute liquidity | `features/us_5min/part-00000.parquet` | Present: 17,236 rows |
-| Dynamic and fixed anchors | `features/anchors/part-00000.parquet` | Present: 180 rows; 174 valid |
-| H1 model data | `features/experiments/run_id=baseline-default/h1.parquet` | Present: 90 rows; 88 sample-eligible |
-| H2 anchor × horizon data | `features/experiments/run_id=baseline-default/h2.parquet` | Present: 1,392 rows; 1,387 valid outcomes |
-| Normalized directional H3 data | `features/experiments/run_id=baseline-default/h3.parquet` | Present: 1,482 rows; 1,477 valid outcomes |
+| H1 daily input | `features/daily/part-00000.parquet` | Present: paired SKHY and FX-adjusted Korean daily prices |
+| Retained overnight model data | `features/experiments/run_id=overnight-best/overnight.parquet` | Present: 90 session rows with full-gap target, previous-close ECT inputs, two SOXX gauges, and executable prices |
+| Bivariate H1 estimates | `reports/run_id=overnight-best/h1_model.parquet` | Present: retained long-run intercept and parity coefficient |
+| Retained SOXX-gauge H2 | `reports/run_id=overnight-best/h2_model.parquet` | Present: Korean return, previous-close ECT, and two aggregate SOXX returns |
+| Expanding-window forecasts | `reports/run_id=overnight-best/overnight_backtest.parquet` | Present: 48 forecasts after 40 initial training observations |
+| Premarket strategy path | `reports/run_id=overnight-best/premarket_to_open_strategy.parquet` | Present: 09:25 entry, minute-level stop/take-profit checks, and 09:30 auction exit proxy |
 
-Anchor coverage consists of 87 valid dynamic premarket anchors and 87 valid
-09:30 anchors. Three dates have missing premarket quotes and three corresponding
-fixed-opening observations are stale or invalid. H3 contains 1,392
-Korea-to-U.S. observations and 90 U.S.-to-Korea observations.
-
-The baseline feature command in `run_commands.txt` uses `force=True`, so it
-rebuilds these outputs even when their content-addressed caches are valid.
-
-`features/experiments/run_id=legacy/` contains earlier Granger and arbitrage
-panels. They are preserved but are not substitutes for the current H1–H3
-datasets.
+The retained equation has 88 complete dates. Earlier experimental model
+artifacts have been removed; raw vendor snapshots remain available for future
+research without entering the retained H1/H2 specification.
 
 ## Validation required before estimation
 
@@ -106,11 +101,9 @@ datasets.
    size for H1.
 2. Confirm exchange calendars, daylight-saving transitions, and Korea-to-U.S.
    session mapping.
-3. Require valid quotes/trades, spread and depth thresholds, and the
-   7:00–9:20 a.m. ET search window for every dynamic anchor.
-4. Add verified release timestamps for event-driven U.S. macro controls and
-   prevent look-ahead joins. Until then, CPI/PCE must remain excluded from
-   intraday experiments.
-5. Report missingness and observation counts for every requested horizon.
-6. Keep Korean proxy coefficients labeled as market-proxy effects, not direct
-   macroeconomic effects.
+3. Verify the SOXX previous-close, 07:00, and 09:25 endpoints after every data
+   refresh.
+4. Continue genuinely forward validation as new SKHY sessions arrive; the H1
+   equilibrium and selected specification were chosen on the historical sample.
+5. Report missingness and observation counts after every refresh before
+   comparing forecast accuracy with the retained 48-forecast sample.

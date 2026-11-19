@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import shlex
 from dataclasses import dataclass, field
-from datetime import time
 from pathlib import Path
 from typing import Final
 
@@ -90,22 +89,12 @@ class EconomicSettings:
 
 
 @dataclass(frozen=True)
-class AnchorSettings:
-    premarket_start: time = time(7, 0)
-    dynamic_search_end: time = time(9, 20)
-    execution_end: time = time(9, 25)
-    comparison_anchor: time = time(9, 30)
-    horizons_minutes: tuple[int, ...] = (5, 10, 15, 30, 45, 60, 100, 120)
-
-
-@dataclass(frozen=True)
 class IngestionSettings:
     paths: PathSettings = field(default_factory=PathSettings)
     massive: MassiveSettings = field(default_factory=MassiveSettings)
     korean: KoreanMarketSettings = field(default_factory=KoreanMarketSettings)
     fx: FxSettings = field(default_factory=FxSettings)
     economic: EconomicSettings = field(default_factory=EconomicSettings)
-    anchors: AnchorSettings = field(default_factory=AnchorSettings)
 
 
 def read_secret(name: str, *, required: bool = True) -> str | None:

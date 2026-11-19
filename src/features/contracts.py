@@ -1,4 +1,4 @@
-"""Typed contracts for the six principal research datasets."""
+"""Typed contracts for the principal research datasets."""
 
 from __future__ import annotations
 
@@ -43,19 +43,6 @@ CONTRACTS: dict[str, DatasetContract] = {
         ),
         ("bar_start_utc", "bar_end_utc"),
     ),
-    "anchors": DatasetContract(
-        "anchors",
-        "one U.S. date by anchor type",
-        ("date_us", "anchor_type"),
-        (
-            "date_us", "anchor_type", "anchor_ts_utc", "anchor_valid",
-            "selection_status", "anchor_mid_usd", "anchor_trade_usd",
-            "liquidity_score", "spread_bps", "volume_5min", "trade_count_5min",
-            "quote_updates_5min", "kr_close_known", "usdkrw_anchor",
-            "parity_spread_anchor", "selection_version",
-        ),
-        ("anchor_ts_utc",),
-    ),
     "h1": DatasetContract(
         "h1",
         "one eligible daily observation",
@@ -68,13 +55,14 @@ CONTRACTS: dict[str, DatasetContract] = {
     ),
     "h2": DatasetContract(
         "h2",
-        "one U.S. date by anchor and horizon",
+        "one U.S. date by fixed thirty-minute response window",
         ("date_us", "anchor_type", "horizon_min"),
         (
             "date_us", "anchor_type", "anchor_ts_utc", "horizon_min",
             "endpoint_ts_utc", "ect_anchor", "liquidity_score",
             "ect_x_liquidity", "spread_bps", "kr_return_known", "adr_return_h",
-            "ect_change_h", "crosses_open", "valid_outcome", "h1_model_id",
+            "soxx_return_h", "usdkrw_return_h", "ect_change_h",
+            "crosses_open", "valid_outcome", "h1_model_id",
         ),
         ("anchor_ts_utc", "endpoint_ts_utc"),
     ),

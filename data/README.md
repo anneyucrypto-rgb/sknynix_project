@@ -24,13 +24,20 @@ hashes so a later refresh cannot silently change an experiment.
 | `features/experiments/run_id=.../` | Versioned model-ready datasets |
 | `research.duckdb` | DuckDB catalog and SQL query engine |
 
-Directories named `legacy_*` and `features/experiments/run_id=legacy/` belong
-to the earlier multi-company Granger design. They are retained for provenance,
-not as H1–H3 inputs.
+The retained overnight run materializes these linked artifacts:
+
+| Artifact | Purpose |
+| --- | --- |
+| `features/daily/part-00000.parquet` | Reusable paired daily data used to estimate the retained H1 equilibrium |
+| `features/experiments/run_id=overnight-best/overnight.parquet` | One date per close-to-open target with previous-close ECT inputs, Korean return, two SOXX gauges, and executable prices |
+| `reports/run_id=overnight-best/h1_model.parquet` | Retained bivariate H1 estimates |
+| `reports/run_id=overnight-best/h2_model.parquet` | Retained Korean-return/ECT/SOXX-gauge H2 estimates |
+| `reports/run_id=overnight-best/overnight_backtest.parquet` | Retained H2 expanding-window predictions and executable fields |
+| `reports/run_id=overnight-best/premarket_to_open_strategy.parquet` | Net 09:25–09:30 strategy path |
 
 ## Current raw-data coverage
 
-Inventory date: 2026-11-17. Coverage is taken from Parquet metadata.
+Inventory date: 2026-11-19. Coverage is taken from Parquet metadata.
 
 | Dataset | Rows | Coverage |
 | --- | ---: | --- |
@@ -38,6 +45,9 @@ Inventory date: 2026-11-17. Coverage is taken from Parquet metadata.
 | SKHY quotes | 22,387,191 | 2026-07-13 through 2026-11-11 |
 | SKHY one-minute bars | 80,317 | 2026-07-13 through 2026-11-17 |
 | SKHY five-minute bars | 17,236 | 2026-07-13 through 2026-11-17 |
+| SKHY scored news events | 144 | 2026-07-14 through 2026-11-17 |
+| SKHY one-minute sentiment buckets | 143 | 2026-07-14 through 2026-11-17 |
+| SKHY five-minute sentiment buckets | 142 | 2026-07-14 through 2026-11-17 |
 | SPY one-minute bars | 1,449,720 | 2020-01-02 through 2026-11-17 |
 | SOXX one-minute bars | 786,053 | 2020-01-02 through 2026-11-17 |
 | 000660 daily prices | 1,684 | 2020-01-02 through 2026-11-17 |
@@ -59,6 +69,7 @@ Run all commands from the repository root:
 ```powershell
 python -m src.ingestion.massive_us --start-date 2020-01-01 --end-date 2026-11-17
 python -m src.ingestion.massive_us --start-date 2026-07-01 --end-date 2026-11-17 --trades --quotes
+python -m src.ingestion.massive_news --start-date 2026-07-13 --end-date 2026-11-18
 python -m src.ingestion.korean_daily --start-date 2020-01-01 --end-date 2026-11-17
 python -m src.ingestion.fx_data --start-date 2020-01-01 --end-date 2026-11-17
 python -m src.ingestion.economic_data --start-date 2020-01-01 --end-date 2026-11-17
@@ -86,9 +97,21 @@ All ingestion commands print:
 | Module | Source | Output scope |
 | --- | --- | --- |
 | `src.ingestion.massive_us` | Massive aggregates/trades/quotes | SKHY, SPY, and SOXX bars; optional SKHY ticks |
+| `src.ingestion.massive_news` | Massive ticker news insights | SKHY article-level LLM sentiment and sparse one-/five-minute buckets |
 | `src.ingestion.korean_daily` | Yahoo Finance | 000660, KOSPI, KOSDAQ, and Korean semiconductor ETF proxy |
 | `src.ingestion.fx_data` | Massive forex aggregates | USD/KRW one- and five-minute bars |
 | `src.ingestion.economic_data` | Massive Economy and market aggregates | U.S. macro data and labeled Korean market proxies |
+
+Ticker-news sentiment is mapped as `positive = 1`, `neutral = 0`, and
+`negative = -1`. The primary normalized bucket score is the bounded net
+article balance `(positive_count - negative_count) / article_count`; it is
+zero for neutral-only or empty inputs. The bucket also retains a
+Jeffreys-smoothed positive/negative log-odds score and its bounded hyperbolic-
+tangent transform, along with the sentiment sum, label counts, article count,
+and article IDs. Minutes without news are absent and should be filled with zero
+only when joining the sparse signal to a complete price grid. Article records retain both `published_utc` and
+`received_at_utc` because Massive does not expose the historical time at which
+an article first became available through its hourly-updated endpoint.
 
 ## Authentication and configuration
 

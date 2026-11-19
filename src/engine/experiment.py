@@ -2,21 +2,19 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
 import hashlib
 import json
 
 from src.engine.control_registry import validate_controls
-from src.features.anchor_selector import AnchorSpec
 
 
 @dataclass(frozen=True)
 class ExperimentSpec:
     hypothesis: str
     estimator: str
-    anchors: tuple[str, ...] = ("premarket_dynamic", "regular_0930")
-    horizons: tuple[int, ...] = (5, 10, 15, 30, 45, 60, 100, 120)
+    horizons: tuple[int, ...] = (30,)
     controls: tuple[str, ...] = ("us_soxx_return", "kr_sector_return")
     max_lags: int = 5
     significance_level: float = 0.05
@@ -51,7 +49,10 @@ class ExperimentSpec:
         if self.training_end_date and self.start_date and self.training_end_date >= self.start_date:
             raise ValueError("training must end before evaluation starts")
         validate_controls(self.controls)
-        if self.h1_model_id != "theory_parity" and (self.h1_intercept is None or self.h1_theta is None):
+        if (
+            self.h1_model_id != "theory_parity"
+            and (self.h1_intercept is None or self.h1_theta is None)
+        ):
             raise ValueError("an estimated h1_model_id requires h1_intercept and h1_theta")
 
     def canonical_json(self) -> str:
@@ -77,5 +78,4 @@ class ResearchConfig:
     adr_ticker: str = "SKHY"
     korea_ticker: str = "000660"
     ordinary_shares_per_ads: float = 0.1
-    anchor: AnchorSpec = field(default_factory=AnchorSpec)
-    default_horizons: tuple[int, ...] = (5, 10, 15, 30, 45, 60, 100, 120)
+    default_horizons: tuple[int, ...] = (30,)

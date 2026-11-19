@@ -1,5 +1,6 @@
 .venv/
 .python_packages/
+/.model_cache/
 __pycache__/
 *.py[cod]
 .env

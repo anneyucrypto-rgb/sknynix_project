@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from src.features.price_parity import add_parity_columns, theoretical_adr_usd
+from src.features.utils import add_parity_columns, theoretical_adr_usd
 
 
 def test_ads_ratio_and_log_spread():

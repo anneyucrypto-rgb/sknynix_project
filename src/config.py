@@ -12,6 +12,15 @@ from typing import Final
 PROJECT_ROOT: Final = Path(__file__).resolve().parents[1]
 
 
+def feature_output_path(path: Path, project_root: Path = PROJECT_ROOT) -> Path:
+    """Resolve a table output beneath the project feature directory."""
+    output = path.resolve()
+    feature_root = (project_root / "data" / "features").resolve()
+    if output == feature_root or not output.is_relative_to(feature_root):
+        raise ValueError(f"Table outputs must be under {feature_root}: {path}")
+    return output
+
+
 @dataclass(frozen=True)
 class PathSettings:
     """Canonical project paths; raw datasets are Parquet directories."""
@@ -25,6 +34,13 @@ class PathSettings:
     @property
     def raw(self) -> Path:
         return self.data / "raw"
+
+    @property
+    def features(self) -> Path:
+        return self.data / "features"
+
+    def feature_run(self, run_id: str) -> Path:
+        return self.features / "experiments" / f"run_id={run_id}"
 
     @property
     def duckdb(self) -> Path:

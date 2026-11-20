@@ -21,15 +21,18 @@ proxies; they are not represented as direct Bank of Korea macro data.
 
 ## Build features
 
-Install the dependencies in `requirements.txt`, then use the builder from the
-project root:
+Install the dependencies in `requirements.txt`, then run the feature builders
+from the project root.
 
-```python
-from src.engine.dataset_builder import DatasetBuilder
-
-with DatasetBuilder() as builder:
-    builder.build(("daily",), force=True)
+```powershell
+python -m src.features.h1_h2
+python -m src.features.chronos_2
 ```
+
+The H1/H2 builder writes the paired daily and overnight H2 input tables.
+The Chronos-2 builder writes a standalone overnight table from the original
+market inputs. Shared transformations and validation live in
+[`src/features/utils.py`](src/features/utils.py).
 
 Reusable outputs are written under `data/features/<dataset>/`. Experiment
 datasets are isolated under
@@ -72,9 +75,11 @@ The forecasting design and retained H1 and H2 estimates are documented in
 The execution rules are documented in
 [`design/BACKTEST_DESIGN.md`](design/BACKTEST_DESIGN.md).
 Trading performance is reported separately in
-[`design/TRADING_RESULTS.md`](design/TRADING_RESULTS.md).
-Parquet model and backtest artifacts remain under
-`reports/run_id=overnight-best/`.
+[`reports/TRADING_RESULTS.md`](reports/TRADING_RESULTS.md).
+Parquet model, forecast, and strategy artifacts are stored under
+`data/features/experiments/`. The `reports/` directory holds Markdown
+results. See [run_commands.txt](run_commands.txt) for the Chronos-2 forecast
+and multi-model comparison commands.
 
 See [data/README.md](data/README.md) for the storage layout and
 [data/MISSING_DATA.md](data/MISSING_DATA.md) for current source coverage.

@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from src.config import PathSettings, feature_output_path
+
 
 def run_overnight_backtest(
     project_root: Path,
@@ -25,10 +27,9 @@ def run_overnight_backtest(
         walk_forward,
     )
 
-    report_dir = project_root / "reports" / f"run_id={run_id}"
-    data_dir = project_root / "data" / "features" / "experiments" / f"run_id={run_id}"
-    h1 = pd.read_parquet(report_dir / "h1_model.parquet")
-    h2 = pd.read_parquet(report_dir / "h2_model.parquet")
+    data_dir = PathSettings(project_root).feature_run(run_id)
+    h1 = pd.read_parquet(data_dir / "h1_model.parquet")
+    h2 = pd.read_parquet(data_dir / "h2_model.parquet")
     h1_row = h1.loc[h1["h1_spec"].eq(h1_spec) & h1["status"].eq("ok")].iloc[0]
     h2_row = h2.loc[
         h2["h1_spec"].eq(h1_spec)
@@ -75,6 +76,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     project_root = Path(__file__).resolve().parents[1]
+    data_dir = PathSettings(project_root).feature_run(args.run_id)
+    output = feature_output_path(args.output or data_dir / "overnight_backtest.parquet", project_root)
     forecasts, metrics = run_overnight_backtest(
         project_root,
         run_id=args.run_id,
@@ -82,8 +85,6 @@ def main() -> int:
         h2_spec=args.h2_spec,
         min_train=args.min_train,
     )
-    report_dir = project_root / "reports" / f"run_id={args.run_id}"
-    output = args.output or report_dir / "overnight_backtest.parquet"
     output.parent.mkdir(parents=True, exist_ok=True)
     forecasts.to_parquet(output, index=False)
     pd.DataFrame([metrics]).to_parquet(

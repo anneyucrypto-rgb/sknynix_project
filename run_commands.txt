@@ -13,8 +13,8 @@ python -m src.ingestion.economic_data --start-date 2020-01-01 --end-date 2026-11
 # Force a complete U.S. bar refresh instead of downloading only uncovered dates.
 python -m src.ingestion.massive_us --start-date 2026-06-01 --end-date 2026-11-17 --refresh-all
 
-# Build the reusable paired daily feature required by the overnight H1 model.
-python -c "from src.engine.dataset_builder import DatasetBuilder; b=DatasetBuilder(); b.build(('daily',), force=True); b.close()"
+# Build the paired daily H1 and point-in-time overnight H2 input tables.
+python -m src.features.h1_h2
 
 # Fit the only retained model: bivariate H1 plus Korean-return/ECT/SOXX-gauge H2.
 python -m src.hypotheses.overnight_ablation --run-id overnight-best --max-p 3 --max-q 0 --min-train 40
@@ -28,16 +28,24 @@ python -m backtest.strategy --run-id overnight-best --calibration-observations 1
 # Run automated tests.
 python -m pytest -q
 
-# Optional Chronos-2 forecast workflow. Run after populating the raw inputs
-# and building the paired daily feature above.
+# Optional Chronos-2 forecast workflow. Build its standalone input after
+# populating the raw SKHY, SOXX, and Korean market Parquet files.
 python -m pip install "chronos-forecasting>=2.2,<3" peft
+python -m src.features.chronos_2
 
-# Forecast the SKHY close-to-open log return at 09:25 ET using all H2 predictors.
-# Start with 40 complete observations and refit LoRA for 50 steps before each
-# one-session-ahead forecast. Each realized observation expands the next fit.
+# Forecast SKHY's overnight return using the Korean day return and two SOXX gauges.
+# Start with 40 complete observations and continue LoRA training for 50 steps
+# before each one-session-ahead forecast as the realized history expands.
 # The output includes simulated 09:30 ET entries and uses CUDA when available.
 # The first run saves base weights to .model_cache/chronos-2 for offline reuse.
-python -m backtest.chronos_2 --min-train 40 --steps 50 --output reports/run_id=chronos-2/forecasts.parquet
+# The final adapter and its training cutoff are saved under .model_cache/chronos-2-finetuned.
+python -m backtest.chronos_2 --min-train 40 --steps 50 --output data/features/experiments/run_id=chronos-2/forecasts.parquet
 
 # Optional smoke check. Run one LoRA step for the first forecast only.
-python -m backtest.chronos_2 --min-train 40 --steps 1 --max-forecasts 1 --output reports/run_id=chronos-2/forecasts-smoke.parquet
+python -m backtest.chronos_2 --min-train 40 --steps 1 --max-forecasts 1 --output data/features/experiments/run_id=chronos-2/forecasts-smoke.parquet
+
+# Backtest H2 and Chronos-2 independently under the same 09:25–09:30 rules.
+# Repeat --forecast MODEL PARQUET for each model. Forecast-only files are
+# joined with SKHY execution data by session date. The summary has one row per model.
+# Parquet tables go under data/features/ and Markdown summaries go under reports/.
+python -m backtest.strategy --forecast h2 data/features/experiments/run_id=overnight-best/overnight_backtest.parquet --forecast chronos-2 data/features/experiments/run_id=chronos-2/forecasts.parquet --output data/features/experiments/forecast_comparison.parquet

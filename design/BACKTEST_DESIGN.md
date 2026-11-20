@@ -154,7 +154,7 @@ does not select among models because the SOXX-gauge H2 is the only retained
 forecast specification.
 
 The current retained-model performance is written to
-`design/TRADING_RESULTS.md` whenever `python -m backtest.strategy` completes.
+`reports/TRADING_RESULTS.md` whenever `python -m backtest.strategy` completes.
 
 ## Auction-data caveat
 

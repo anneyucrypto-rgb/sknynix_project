@@ -29,11 +29,18 @@ The retained overnight run materializes these linked artifacts:
 | Artifact | Purpose |
 | --- | --- |
 | `features/daily/part-00000.parquet` | Reusable paired daily data used to estimate the retained H1 equilibrium |
+| `features/overnight_h2/part-00000.parquet` | Standalone H2 input including point-in-time FX |
+| `features/overnight/part-00000.parquet` | Standalone Chronos-2 target and covariates with execution fields |
 | `features/experiments/run_id=overnight-best/overnight.parquet` | One date per close-to-open target with previous-close ECT inputs, Korean return, two SOXX gauges, and executable prices |
-| `reports/run_id=overnight-best/h1_model.parquet` | Retained bivariate H1 estimates |
-| `reports/run_id=overnight-best/h2_model.parquet` | Retained Korean-return/ECT/SOXX-gauge H2 estimates |
-| `reports/run_id=overnight-best/overnight_backtest.parquet` | Retained H2 expanding-window predictions and executable fields |
-| `reports/run_id=overnight-best/premarket_to_open_strategy.parquet` | Net 09:25–09:30 strategy path |
+| `features/experiments/run_id=overnight-best/h1_model.parquet` | Retained bivariate H1 estimates |
+| `features/experiments/run_id=overnight-best/h2_model.parquet` | Retained Korean-return/ECT/SOXX-gauge H2 estimates |
+| `features/experiments/run_id=overnight-best/overnight_backtest.parquet` | Retained H2 expanding-window predictions and executable fields |
+| `features/experiments/run_id=overnight-best/premarket_to_open_strategy.parquet` | Net 09:25–09:30 strategy path |
+
+Build the standalone feature tables with `python -m src.features.h1_h2` and
+`python -m src.features.chronos_2`. Model estimates, forecasts, strategy paths,
+and machine-readable summaries are Parquet tables under `data/features/`.
+Final Markdown reports go in the repository's `reports/` directory.
 
 ## Current raw-data coverage
 

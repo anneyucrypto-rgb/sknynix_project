@@ -86,10 +86,10 @@ the complete target architecture.
 | --- | --- | --- |
 | H1 daily input | `features/daily/part-00000.parquet` | Present: paired SKHY and FX-adjusted Korean daily prices |
 | Retained overnight model data | `features/experiments/run_id=overnight-best/overnight.parquet` | Present: 90 session rows with full-gap target, previous-close ECT inputs, two SOXX gauges, and executable prices |
-| Bivariate H1 estimates | `reports/run_id=overnight-best/h1_model.parquet` | Present: retained long-run intercept and parity coefficient |
-| Retained SOXX-gauge H2 | `reports/run_id=overnight-best/h2_model.parquet` | Present: Korean return, previous-close ECT, and two aggregate SOXX returns |
-| Expanding-window forecasts | `reports/run_id=overnight-best/overnight_backtest.parquet` | Present: 48 forecasts after 40 initial training observations |
-| Premarket strategy path | `reports/run_id=overnight-best/premarket_to_open_strategy.parquet` | Present: 09:25 entry, minute-level stop/take-profit checks, and 09:30 auction exit proxy |
+| Bivariate H1 estimates | `features/experiments/run_id=overnight-best/h1_model.parquet` | Present: retained long-run intercept and parity coefficient |
+| Retained SOXX-gauge H2 | `features/experiments/run_id=overnight-best/h2_model.parquet` | Present: Korean return, previous-close ECT, and two aggregate SOXX returns |
+| Expanding-window forecasts | `features/experiments/run_id=overnight-best/overnight_backtest.parquet` | Present: 48 forecasts after 40 initial training observations |
+| Premarket strategy path | `features/experiments/run_id=overnight-best/premarket_to_open_strategy.parquet` | Present: 09:25 entry, minute-level stop/take-profit checks, and 09:30 auction exit proxy |
 
 The retained equation has 88 complete dates. Earlier experimental model
 artifacts have been removed; raw vendor snapshots remain available for future

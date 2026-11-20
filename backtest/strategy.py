@@ -11,6 +11,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from src.config import PathSettings, feature_output_path
+
+
+EXECUTION_COLUMNS = [
+    "tradable_return_0925_0930", "entry_0925", "open_0930",
+    "premarket_exit_dollar_volume", "opening_dollar_volume",
+    *(f"trade_high_m{offset}" for offset in range(5)),
+    *(f"trade_low_m{offset}" for offset in range(5)),
+]
+
 
 @dataclass(frozen=True)
 class PremarketStrategySpec:
@@ -39,7 +49,7 @@ def _calibrate_remaining_return(
     current_forecast: float,
     minimum_volatility: float,
 ) -> tuple[float, float, float, float]:
-    """Map the H2 gap nowcast to a 09:25–09:30 return using prior dates only."""
+    """Map the gap forecast to a 09:25–09:30 return using prior dates only."""
 
     x = pd.to_numeric(history["forecast_return"], errors="coerce").to_numpy(float)
     y = pd.to_numeric(
@@ -106,13 +116,7 @@ def evaluate_premarket_to_open_strategy(
 ) -> tuple[pd.DataFrame, dict[str, float | int | str]]:
     """Apply cost hurdle, volatility sizing, stops, and drawdown pauses."""
 
-    required = {
-        "date_us", "forecast_return", "actual_return",
-        "tradable_return_0925_0930", "entry_0925", "open_0930",
-        "premarket_exit_dollar_volume", "opening_dollar_volume",
-        *(f"trade_high_m{offset}" for offset in range(5)),
-        *(f"trade_low_m{offset}" for offset in range(5)),
-    }
+    required = {"date_us", "forecast_return", "actual_return", *EXECUTION_COLUMNS}
     missing = required.difference(forecasts.columns)
     if missing:
         raise ValueError(f"Premarket strategy input is missing: {sorted(missing)}")
@@ -310,7 +314,16 @@ def evaluate_premarket_to_open_strategy(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id", default="overnight-best")
-    parser.add_argument("--input", type=Path)
+    inputs = parser.add_mutually_exclusive_group()
+    inputs.add_argument("--input", type=Path, help="Single forecast Parquet file")
+    inputs.add_argument(
+        "--forecast", nargs=2, action="append", metavar=("MODEL", "PARQUET"),
+        help="Named forecast file containing 09:25 close-to-open log forecasts. Repeat for each model.",
+    )
+    parser.add_argument(
+        "--execution-data", type=Path,
+        help="Optional overnight execution panel. Defaults to rebuilding from raw bars when needed.",
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--calibration-observations", type=int, default=10)
     parser.add_argument("--safety-buffer-bps", type=float, default=10.0)
@@ -329,16 +342,82 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _session_index(frame: pd.DataFrame, source: str) -> pd.DataFrame:
+    dates = pd.to_datetime(frame["date_us"], errors="raise").dt.normalize()
+    if dates.isna().any() or dates.duplicated().any():
+        raise ValueError(f"{source} must contain one valid row per US session")
+    return frame.assign(date_us=dates.dt.date)
+
+
+def _load_execution_data(path: Path | None) -> pd.DataFrame:
+    if path is None:
+        from src.features.utils import build_overnight_features
+
+        execution = build_overnight_features()
+    else:
+        execution = pd.read_parquet(path)
+    if "actual_return" not in execution:
+        execution = execution.rename(columns={"overnight_return": "actual_return"})
+    required = ["date_us", "actual_return", *EXECUTION_COLUMNS]
+    return _session_index(execution[required], str(path or "Raw execution panel"))
+
+
+def evaluate_forecast_files(
+    sources: list[tuple[str, Path]],
+    spec: PremarketStrategySpec,
+    execution_path: Path | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Evaluate each file with its own calibration history and portfolio."""
+    execution = None
+    results_by_model = []
+    summaries = []
+    for model, path in sources:
+        forecasts = _session_index(pd.read_parquet(path), str(path))
+        if "forecast_return" not in forecasts:
+            forecasts = forecasts.rename(columns={"forecast_log_return": "forecast_return"})
+        if "forecast_return" not in forecasts:
+            raise ValueError(f"{path} needs forecast_return or forecast_log_return")
+        input_count = len(forecasts)
+        if execution_path is not None or not {"actual_return", *EXECUTION_COLUMNS}.issubset(forecasts):
+            if execution is None:
+                execution = _load_execution_data(execution_path)
+            # Derive realized returns and fills from the execution panel.
+            # Forecast files can carry their own simulated entry fields.
+            forecasts = forecasts.drop(
+                columns=["actual_return", *EXECUTION_COLUMNS], errors="ignore"
+            ).merge(execution, on="date_us", how="left", validate="one_to_one")
+        numeric = ["forecast_return", "actual_return", *EXECUTION_COLUMNS]
+        forecasts[numeric] = forecasts[numeric].apply(pd.to_numeric, errors="coerce")
+        complete = np.isfinite(forecasts[numeric].to_numpy(dtype=float, na_value=np.nan)).all(axis=1)
+        forecasts = forecasts.loc[complete]
+        if forecasts.empty:
+            raise ValueError(f"{model} has no forecast sessions with complete execution data")
+
+        results, metrics = evaluate_premarket_to_open_strategy(forecasts, spec)
+        results_by_model.append(results.assign(forecast_model=model))
+        summaries.append({
+            "forecast_model": model,
+            "forecast_file": str(path),
+            "input_forecasts": input_count,
+            "excluded_sessions": input_count - len(results),
+            "first_session": results["date_us"].iloc[0],
+            "last_session": results["date_us"].iloc[-1],
+            **metrics,
+        })
+    return pd.concat(results_by_model, ignore_index=True), pd.DataFrame(summaries)
+
+
 def _write_trading_results(
-    report_dir: Path,
+    data_dir: Path,
+    output: Path,
     run_id: str,
     metrics: dict[str, float | int | str],
     spec: PremarketStrategySpec,
 ) -> Path:
-    """Write the retained model's executable-strategy result in design/."""
+    """Write the retained model's executable-strategy report."""
 
-    backtest = pd.read_parquet(report_dir / "overnight_backtest_summary.parquet").iloc[0]
-    h2 = pd.read_parquet(report_dir / "h2_model.parquet").iloc[0]
+    backtest = pd.read_parquet(data_dir / "overnight_backtest_summary.parquet").iloc[0]
+    h2 = pd.read_parquet(data_dir / "h2_model.parquet").iloc[0]
 
     def number(name: str, digits: int = 4) -> str:
         value = float(metrics[name])
@@ -429,17 +508,54 @@ def _write_trading_results(
         "Nasdaq's MOO timing is documented in the [Opening/Closing Cross FAQ](https://beta.nasdaqtrader.com/content/ProductsServices/Trading/Crosses/openclose_faqs.pdf). The one-minute 09:30 open remains an auction-price proxy rather than an order-level fill record.",
         "",
     ]
-    output = report_dir.parents[1] / "design" / "TRADING_RESULTS.md"
+    output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("\n".join(lines), encoding="utf-8")
     return output
+
+
+def _write_forecast_comparison(summary: pd.DataFrame, output: Path) -> None:
+    lines = [
+        "# Premarket-to-open forecast strategy results",
+        "",
+        "Each forecast file was evaluated independently under the 09:25–09:30 ET rules.",
+        "",
+        "| Model | Evaluated sessions | Excluded | Trades | Net return | Sharpe | Ending fund |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in summary.itertuples(index=False):
+        model = row.forecast_model.replace("|", r"\|").replace("\n", " ")
+        sharpe = f"{row.sharpe_ratio:.2f}" if np.isfinite(row.sharpe_ratio) else "—"
+        lines.append(
+            f"| {model} | {row.first_session}–{row.last_session} "
+            f"({row.strategy_observations}) | {row.excluded_sessions} | {row.active_trades} "
+            f"| {row.total_return:.2%} | {sharpe} | ${row.ending_fund:,.2f} |"
+        )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main() -> int:
     args = parse_args()
     project_root = Path(__file__).resolve().parents[1]
-    report_dir = project_root / "reports" / f"run_id={args.run_id}"
-    input_path = args.input or report_dir / "overnight_backtest.parquet"
-    output_path = args.output or report_dir / "premarket_to_open_strategy.parquet"
+    data_dir = PathSettings(project_root).feature_run(args.run_id)
+    reports = project_root / "reports"
+    default_run = args.input is None and args.forecast is None and args.execution_data is None
+    if args.forecast:
+        sources = [(name, Path(path)) for name, path in args.forecast]
+    else:
+        input_path = args.input or data_dir / "overnight_backtest.parquet"
+        sources = [(input_path.stem if args.input else "h2", input_path)]
+    names = [name for name, _ in sources]
+    if len(names) != len(set(names)):
+        raise SystemExit("Use a unique name for each --forecast")
+    output_name = "premarket_to_open_strategy.parquet" if default_run else "forecast_strategies.parquet"
+    output_path = feature_output_path(args.output or data_dir / output_name, project_root)
+    summary_path = output_path.with_name(output_path.stem + "_summary.parquet")
+    input_paths = {path.resolve() for _, path in sources}
+    if args.execution_data is not None:
+        input_paths.add(args.execution_data.resolve())
+    if input_paths.intersection({output_path.resolve(), summary_path.resolve()}):
+        raise SystemExit("Choose an output path that differs from the input files")
     spec = PremarketStrategySpec(
         calibration_observations=args.calibration_observations,
         safety_buffer_bps=args.safety_buffer_bps,
@@ -456,19 +572,20 @@ def main() -> int:
         initial_fund=args.initial_fund,
         minimum_fund=args.minimum_fund,
     )
-    results, metrics = evaluate_premarket_to_open_strategy(
-        pd.read_parquet(input_path), spec
-    )
+    results, summary = evaluate_forecast_files(sources, spec, args.execution_data)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     results.to_parquet(output_path, index=False)
-    pd.DataFrame([metrics]).to_parquet(
-        output_path.with_name(output_path.stem + "_summary.parquet"), index=False
-    )
-    trading_report = _write_trading_results(
-        report_dir, args.run_id, metrics, spec
-    )
-    print(pd.Series(metrics).to_string(), flush=True)
+    summary.to_parquet(summary_path, index=False)
+    print(summary.set_index("forecast_model").T.to_string(), flush=True)
     print(f"[STRATEGY] Wrote {output_path}", flush=True)
+    print(f"[STRATEGY] Wrote {summary_path}", flush=True)
+    if default_run:
+        trading_report = _write_trading_results(
+            data_dir, reports / "TRADING_RESULTS.md", args.run_id, summary.iloc[0].to_dict(), spec
+        )
+    else:
+        trading_report = reports / (output_path.stem + "_summary.md")
+        _write_forecast_comparison(summary, trading_report)
     print(f"[STRATEGY] Wrote {trading_report}", flush=True)
     return 0
 

@@ -18,7 +18,8 @@ two retained controls are aggregate point-in-time gauges rather than lagged
 five-minute blocks.
 
 The bivariate-H1/SOXX-gauge equation is the retained H2 specification.
-Chronos-2 reuses its predictors in a separate walk-forward forecast.
+Chronos-2 uses the Korean day return and the two SOXX gauges in a separate
+walk-forward forecast.
 
 ## H1: bivariate equilibrium
 
@@ -91,7 +92,7 @@ and no lagged SOXX-gauge terms enter the final equation.
 The H1 and H2 estimates and validation metrics shown here come from
 `overnight-best`, reported on 19 November 2026. Run-specific model artifacts
 are stored as `h1_model.parquet` and `h2_model.parquet` under
-`reports/run_id=overnight-best/`.
+`data/features/experiments/run_id=overnight-best/`.
 
 | Measure | Result |
 | --- | ---: |
@@ -122,12 +123,14 @@ against a zero-return forecast.
 
 [backtest/chronos_2.py](../backtest/chronos_2.py) forecasts one U.S. session
 ahead with the pretrained Amazon Chronos-2 checkpoint. Its target is the same
-log return \(r^{ON}_d\) as H2. Its inputs are historical target returns and all
-four H2 covariates. The current values of the covariates are known by 09:25 ET.
+SKHY log return \(r^{ON}_d\), stored as `overnight_return`. Its inputs are
+historical target returns and the three covariates below. The feature builder
+computes them from the original SKHY and SOXX one-minute Parquet files and the
+Korean daily Parquet files, and writes a standalone panel under
+`data/features/overnight/`.
 
 | Covariate | Information available at the forecast cutoff |
 | --- | --- |
-| ECT | Prior SKHY regular close, completed Korean close, and as-of USD/KRW |
 | Korean day return | Completed Korean open-to-close return |
 | SOXX overnight gauge | Prior regular close to the last price available at 07:00 ET |
 | SOXX premarket gauge | 07:00 ET to the last price available at 09:25 ET |
@@ -135,21 +138,19 @@ four H2 covariates. The current values of the covariates are known by 09:25 ET.
 1. Sort by U.S. session date and begin forecasting after 40 complete prior
    observations by default. A training row needs the realized overnight return
    and all predictor inputs. A forecast row needs the predictor inputs.
-2. At each forecast origin \(d\), fit the bivariate H1 equilibrium on daily
-   sessions strictly before \(d\). BIC searches ARDL orders from one through
-   three for each level variable. Use that origin's fitted intercept and slope
-   to recompute ECT for the training history and the forecast row.
-3. Start from the pretrained checkpoint and fit a fresh LoRA adapter on the
-   expanding history. The default fit uses 50 optimization steps, a learning
+2. Start from the pretrained checkpoint and train a LoRA adapter on the initial
+   history. Continue training the same adapter weights at each later origin
+   using the expanding history and a new optimizer. Each default fit uses 50
+   optimization steps, a learning
    rate of \(10^{-5}\), and a minimum training context of eight observations.
    Each historical training window supplies past returns and covariates as
    context and the covariates known at the forecasted step as conditioning
    inputs. The realized return at that step is the training label.
-4. At inference, supply the historical context and the four covariate values
+3. At inference, supply the historical context and the three covariate values
    for \(d\). Generate the 10th, 50th, and 90th percentiles of the one-step
    return forecast. Use the median as the point forecast. The current return
    and opening price are excluded from the model inputs.
-5. In the historical simulation, a positive median signals a long entry and a
+4. In the historical simulation, a positive median signals a long entry and a
    negative median signals a short entry at the 09:30 ET open. A zero median
    produces no entry. Record the simulated entry price when the open is
    available. The opening price determines the realized forecast target, which
@@ -160,11 +161,17 @@ training cutoffs, and simulated opening entries. The close-to-open return is a
 forecast target. A position entered at the open would need a subsequent exit
 price to measure its trading return.
 
-Run from the repository root after preparing the raw and daily inputs listed
+After the last forecast, the final training update includes that session's
+realized return if available. The adapter and its training cutoff are saved
+under `.model_cache/chronos-2-finetuned/`. Each historical evaluation starts
+from the pretrained base to keep the training cutoff valid at every origin.
+
+Run from the repository root after preparing the raw market inputs listed
 in [run_commands.txt](../run_commands.txt).
 
 ```powershell
-python -m backtest.chronos_2 --min-train 40 --steps 50 --output reports/run_id=chronos-2/forecasts.parquet
+python -m src.features.chronos_2
+python -m backtest.chronos_2 --min-train 40 --steps 50 --output data/features/experiments/run_id=chronos-2/forecasts.parquet
 ```
 
 ## Executable premarket-to-open strategy
@@ -198,7 +205,7 @@ Only the executable 09:25–09:30 return is credited. The strategy never claims
 the portion of the overnight gap already realized by 09:25. Transaction costs,
 slippage, market impact, and risk controls are included.
 
-The [trading results](TRADING_RESULTS.md) report the execution metrics for
+The [trading results](../reports/TRADING_RESULTS.md) report the execution metrics for
 the H2 premarket-to-open strategy.
 
 Nasdaq's MOO timing is documented in the

@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 from src.config import PathSettings, feature_output_path
@@ -23,40 +22,28 @@ def run_overnight_backtest(
 
     from src.hypotheses.overnight_ablation import (
         H2_SPECS,
-        common_comparison_dates,
-        walk_forward,
+        walk_forward_h2,
     )
 
-    data_dir = PathSettings(project_root).feature_run(run_id)
-    h1 = pd.read_parquet(data_dir / "h1_model.parquet")
+    paths = PathSettings(project_root)
+    data_dir = paths.feature_run(run_id)
     h2 = pd.read_parquet(data_dir / "h2_model.parquet")
-    h1_row = h1.loc[h1["h1_spec"].eq(h1_spec) & h1["status"].eq("ok")].iloc[0]
     h2_row = h2.loc[
         h2["h1_spec"].eq(h1_spec)
         & h2["h2_spec"].eq(h2_spec)
         & h2["status"].eq("ok")
     ].iloc[0]
     overnight = pd.read_parquet(data_dir / "overnight.parquet")
-    overnight["ect"] = (
-        np.log(overnight["previous_us_close"])
-        - float(h1_row["intercept"])
-        - float(h1_row["theta"]) * overnight["log_kr_usd_cutoff"]
-    )
-    dates = common_comparison_dates(overnight, h2)
-    forecasts, forecast_metrics = walk_forward(
-        overnight.loc[overnight["date_us"].isin(dates)],
-        H2_SPECS[h2_spec],
-        int(h2_row["p_daily"]),
-        int(h2_row["q_five_minute"]),
-        min_train=min_train,
+    daily = pd.read_parquet(paths.features / "daily" / "part-00000.parquet")
+    forecasts, forecast_metrics = walk_forward_h2(
+        overnight, daily, H2_SPECS[h2_spec], min_train,
+        max_p=int(h2_row.get("forecast_max_p", 3)),
     )
     metrics: dict[str, float | int | str] = {
         "model": "overnight",
         "h1_spec": h1_spec,
         "h2_spec": h2_spec,
-        "p_daily": int(h2_row["p_daily"]),
-        "q_five_minute": int(h2_row["q_five_minute"]),
-        "common_comparison_n": len(dates),
+        "common_comparison_n": min_train + len(forecasts),
         "initial_training_n": min_train,
         **forecast_metrics,
     }

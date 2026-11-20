@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import math
 from pathlib import Path
@@ -42,6 +42,7 @@ class PremarketStrategySpec:
     initial_fund: float = 10_000.0
     minimum_fund: float = 9_000.0
     annualization_sessions: int = 252
+    stop_loss_enabled: bool = True
 
 
 def _calibrate_remaining_return(
@@ -79,25 +80,26 @@ def _impact_bps(notional: float, dollar_volume: float, coefficient_bps: float) -
 def _simulate_exit(
     row: pd.Series,
     position: int,
-    stop_distance: float,
+    stop_distance: float | None,
     take_distance: float,
 ) -> tuple[float, float, str]:
     """Simulate protective exits through 09:27, then lock the 09:30 MOO."""
 
     entry = float(row["entry_0925"])
     if position > 0:
-        stop_price = entry * math.exp(-stop_distance)
         take_price = entry * math.exp(take_distance)
     else:
-        stop_price = entry * math.exp(stop_distance)
         take_price = entry * math.exp(-take_distance)
+    stop_price = (
+        entry * math.exp(-position * stop_distance) if stop_distance is not None else None
+    )
 
     # A MOO must be submitted before 09:28. Once it is locked, the strategy no
     # longer assumes a protective order can cancel the auction instruction.
     for offset in range(3):
         high = float(row[f"trade_high_m{offset}"])
         low = float(row[f"trade_low_m{offset}"])
-        stop_hit = low <= stop_price if position > 0 else high >= stop_price
+        stop_hit = stop_price is not None and (low <= stop_price if position > 0 else high >= stop_price)
         take_hit = high >= take_price if position > 0 else low <= take_price
         if stop_hit:
             asset_return = -stop_distance if position > 0 else stop_distance
@@ -202,8 +204,10 @@ def evaluate_premarket_to_open_strategy(
                     spec.take_profit_sigma * volatility,
                 )
                 asset_return, exit_price, exit_reason = _simulate_exit(
-                    row, position, stop_distance, take_distance
+                    row, position, stop_distance if spec.stop_loss_enabled else None, take_distance
                 )
+                if not spec.stop_loss_enabled:
+                    stop_distance = math.nan
                 gross_return = weight * asset_return
                 net_return = gross_return - abs(weight) * execution_cost_rate
                 status = "active"
@@ -265,6 +269,7 @@ def evaluate_premarket_to_open_strategy(
     configured_rr = results.loc[active, "take_profit_distance"].div(
         results.loc[active, "stop_loss_distance"]
     )
+    forecast_error = results["forecast_return"] - results["actual_return"]
 
     metrics: dict[str, float | int | str] = {
         "strategy_mode": "premarket_to_open",
@@ -304,6 +309,8 @@ def evaluate_premarket_to_open_strategy(
         "initial_fund": spec.initial_fund,
         "ending_fund": fund,
         "minimum_fund": spec.minimum_fund,
+        "overnight_forecast_rmse": float(np.sqrt(np.square(forecast_error).mean())),
+        "overnight_forecast_mae": float(forecast_error.abs().mean()),
         "overnight_forecast_direction_accuracy": float(
             np.sign(results["forecast_return"]).eq(np.sign(results["actual_return"])).mean()
         ),
@@ -333,6 +340,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--risk-aversion", type=float, default=0.0025)
     parser.add_argument("--max-weight", type=float, default=1.0)
     parser.add_argument("--stop-loss-sigma", type=float, default=0.75)
+    parser.add_argument("--no-stop-loss", action="store_true", help="Disable only stop-loss exits")
     parser.add_argument("--take-profit-sigma", type=float, default=1.50)
     parser.add_argument("--drawdown-pause-pct", type=float, default=1.0)
     parser.add_argument("--pause-sessions", type=int, default=5)
@@ -513,15 +521,46 @@ def _write_trading_results(
     return output
 
 
-def _write_forecast_comparison(summary: pd.DataFrame, output: Path) -> None:
+def _write_forecast_comparison(
+    summary: pd.DataFrame, results: pd.DataFrame, output: Path,
+    baseline: pd.DataFrame | None = None,
+) -> None:
     lines = [
         "# Premarket-to-open forecast strategy results",
         "",
         "Each forecast file was evaluated independently under the 09:25–09:30 ET rules.",
         "",
+        "## Close-to-open forecast accuracy",
+        "",
+        "RMSE and MAE are in basis points of log return. Directional accuracy is the",
+        "share of evaluated sessions where the forecast and realized return have the same sign.",
+        "",
+        "| Model | Sessions | RMSE (bps) | MAE (bps) | Directional accuracy |",
+        "| --- | ---: | ---: | ---: | ---: |",
+    ]
+    for row in summary.itertuples(index=False):
+        model = row.forecast_model.replace("|", r"\|").replace("\n", " ")
+        lines.append(
+            f"| {model} | {row.strategy_observations} | "
+            f"{10_000 * row.overnight_forecast_rmse:.2f} | "
+            f"{10_000 * row.overnight_forecast_mae:.2f} | "
+            f"{row.overnight_forecast_direction_accuracy:.2%} |"
+        )
+    lines.extend([
+        "",
+        "## Trading performance",
+        "",
+    ])
+    if baseline is not None:
+        lines.extend([
+            "Stop-loss exits are disabled. Take-profit, execution cost, sizing, and",
+            "portfolio risk settings are the same as in the stop-loss baseline.",
+            "",
+        ])
+    lines.extend([
         "| Model | Evaluated sessions | Excluded | Trades | Net return | Sharpe | Ending fund |",
         "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
-    ]
+    ])
     for row in summary.itertuples(index=False):
         model = row.forecast_model.replace("|", r"\|").replace("\n", " ")
         sharpe = f"{row.sharpe_ratio:.2f}" if np.isfinite(row.sharpe_ratio) else "—"
@@ -530,6 +569,93 @@ def _write_forecast_comparison(summary: pd.DataFrame, output: Path) -> None:
             f"({row.strategy_observations}) | {row.excluded_sessions} | {row.active_trades} "
             f"| {row.total_return:.2%} | {sharpe} | ${row.ending_fund:,.2f} |"
         )
+    lines.extend([
+        "",
+        "## Trade breakdown",
+        "",
+        "Forecast accuracy measures the prior close to the 09:30 open. Trading P&L",
+        "starts at the 09:25 entry and reflects the calibrated signal, position size,",
+        "exit price, and execution costs. Gross P&L uses each trade’s starting fund",
+        "before costs. Net P&L is the actual change in the simulated fund.",
+    ])
+    exit_labels = {"moo_0930": "09:30 opening auction"}
+    for minute in range(3):
+        exit_labels[f"stop_loss_m{minute}"] = f"Stop-loss at 09:{25 + minute:02d}"
+        exit_labels[f"take_profit_m{minute}"] = f"Take-profit at 09:{25 + minute:02d}"
+    active = results.loc[results["position"].ne(0)].copy()
+    active["gross_pnl"] = active["fund_before"] * np.expm1(active["gross_strategy_return"])
+    active["net_pnl"] = active["fund_after"] - active["fund_before"]
+    active["cost_pnl"] = active["gross_pnl"] - active["net_pnl"]
+    for name in summary["forecast_model"]:
+        model = name.replace("|", r"\|").replace("\n", " ")
+        trades = active.loc[active["forecast_model"].eq(name)]
+        lines.extend(["", f"### {model}", ""])
+        if trades.empty:
+            lines.append("No trades met the entry rules.")
+            continue
+        lines.extend([
+            "| Session | Side | Exposure | Entry | Exit | Exit reason | Gross P&L (USD) | Cost (USD) | Net P&L (USD) |",
+            "| --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: |",
+        ])
+        for trade in trades.itertuples(index=False):
+            side = "Long" if trade.position > 0 else "Short"
+            reason = exit_labels.get(trade.exit_reason, trade.exit_reason)
+            lines.append(
+                f"| {trade.date_us} | {side} | {abs(trade.target_weight):.2%} | "
+                f"${trade.entry_0925:.4f} | ${trade.exit_price:.4f} | {reason} | "
+                f"{trade.gross_pnl:+.2f} | {trade.cost_pnl:.2f} | {trade.net_pnl:+.2f} |"
+            )
+        gross = trades["gross_pnl"]
+        wins = gross.clip(lower=0).sum()
+        losses = -gross.clip(upper=0).sum()
+        stopped = trades.loc[trades["exit_reason"].str.startswith("stop_loss")]
+        stop_detail = (
+            f", including ${-stopped['gross_pnl'].sum():,.2f} across {len(stopped)} stop-loss exits"
+            if not stopped.empty else ""
+        )
+        lines.extend([
+            "",
+            f"Gross gains were ${wins:,.2f} against ${losses:,.2f} in gross losses{stop_detail}. "
+            f"Execution costs reduced the result by ${trades['cost_pnl'].sum():,.2f}, "
+            f"leaving net P&L of {trades['net_pnl'].sum():+,.2f} USD.",
+        ])
+    if baseline is not None:
+        lines.extend([
+            "",
+            "## Previously stopped trades at the 09:30 exit",
+            "",
+            "The auction scenario uses the no-stop rerun’s position size and execution",
+            "cost rate. If a take-profit exits earlier, rerun P&L reflects that exit.",
+            "",
+            "| Model | Session | 09:30 open | Original stop P&L (USD) | 09:30 P&L (USD) | Change (USD) | Rerun exit | Rerun P&L (USD) |",
+            "| --- | --- | ---: | ---: | ---: | ---: | --- | ---: |",
+        ])
+        stopped = baseline.loc[baseline["exit_reason"].str.startswith("stop_loss")]
+        compared = stopped.merge(
+            results, on=["forecast_model", "date_us"], suffixes=("_stop", "_rerun"),
+            validate="one_to_one",
+        )
+        for trade in compared.itertuples(index=False):
+            original_pnl = trade.fund_after_stop - trade.fund_before_stop
+            model = trade.forecast_model.replace("|", r"\|").replace("\n", " ")
+            if trade.position_rerun == 0:
+                lines.append(
+                    f"| {model} | {trade.date_us} | ${trade.open_0930_rerun:.4f} | "
+                    f"{original_pnl:+.2f} | — | — | No trade | 0.00 |"
+                )
+                continue
+            auction_return = (
+                trade.target_weight_rerun * math.log(trade.open_0930_rerun / trade.entry_0925_rerun)
+                - abs(trade.target_weight_rerun) * trade.execution_cost_rate_rerun
+            )
+            auction_pnl = trade.fund_before_rerun * math.expm1(auction_return)
+            rerun_pnl = trade.fund_after_rerun - trade.fund_before_rerun
+            reason = exit_labels.get(trade.exit_reason_rerun, trade.exit_reason_rerun)
+            lines.append(
+                f"| {model} | {trade.date_us} | ${trade.open_0930_rerun:.4f} | "
+                f"{original_pnl:+.2f} | {auction_pnl:+.2f} | {auction_pnl - original_pnl:+.2f} | "
+                f"{reason} | {rerun_pnl:+.2f} |"
+            )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -539,7 +665,10 @@ def main() -> int:
     project_root = Path(__file__).resolve().parents[1]
     data_dir = PathSettings(project_root).feature_run(args.run_id)
     reports = project_root / "reports"
-    default_run = args.input is None and args.forecast is None and args.execution_data is None
+    default_run = (
+        args.input is None and args.forecast is None
+        and args.execution_data is None and not args.no_stop_loss
+    )
     if args.forecast:
         sources = [(name, Path(path)) for name, path in args.forecast]
     else:
@@ -571,8 +700,14 @@ def main() -> int:
         hard_drawdown_stop_pct=args.hard_drawdown_stop_pct,
         initial_fund=args.initial_fund,
         minimum_fund=args.minimum_fund,
+        stop_loss_enabled=not args.no_stop_loss,
     )
     results, summary = evaluate_forecast_files(sources, spec, args.execution_data)
+    baseline = None
+    if args.no_stop_loss:
+        baseline, _ = evaluate_forecast_files(
+            sources, replace(spec, stop_loss_enabled=True), args.execution_data
+        )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     results.to_parquet(output_path, index=False)
     summary.to_parquet(summary_path, index=False)
@@ -585,7 +720,7 @@ def main() -> int:
         )
     else:
         trading_report = reports / (output_path.stem + "_summary.md")
-        _write_forecast_comparison(summary, trading_report)
+        _write_forecast_comparison(summary, results, trading_report, baseline)
     print(f"[STRATEGY] Wrote {trading_report}", flush=True)
     return 0
 

@@ -37,7 +37,8 @@ H2_SPECS: dict[str, OvernightSpec] = {
 
 
 def fit_h1(
-    frame: pd.DataFrame, controls: tuple[str, ...], max_lags: int
+    frame: pd.DataFrame, controls: tuple[str, ...], max_lags: int, *,
+    diagnostics: bool = True,
 ) -> tuple[dict[str, object], object]:
     """Select a UECM-convertible bivariate ARDL by BIC."""
 
@@ -61,9 +62,6 @@ def fit_h1(
     model = UECM.from_ardl(selected)
     hac_lags = max(1, int(math.floor(4 * (len(sample) / 100) ** (2 / 9))))
     result = model.fit(cov_type="HAC", cov_kwds={"maxlags": hac_lags})
-    bounds = result.bounds_test(
-        case=3, cov_type="HAC", cov_kwds={"maxlags": hac_lags}
-    )
     rho = float(result.params["log_adr.L1"])
     record: dict[str, object] = {
         "nobs": int(result.nobs),
@@ -72,11 +70,14 @@ def fit_h1(
         "bic": float(result.bic),
         "h1_lambda": rho,
         "h1_lambda_p": float(result.pvalues["log_adr.L1"]),
-        "bounds_f": float(bounds.stat),
-        "bounds_upper_p": float(bounds.p_values["upper"]),
         "intercept": -float(result.params["const"]) / rho,
         "theta": -float(result.params["log_kr_usd.L1"]) / rho,
     }
+    if diagnostics:
+        bounds = result.bounds_test(
+            case=3, cov_type="HAC", cov_kwds={"maxlags": hac_lags}
+        )
+        record.update(bounds_f=float(bounds.stat), bounds_upper_p=float(bounds.p_values["upper"]))
     return record, result
 
 
@@ -136,21 +137,37 @@ def walk_forward(
     p_order: int,
     q_order: int,
     min_train: int,
+    *,
+    h1_daily: pd.DataFrame | None = None,
+    max_h1_lags: int = 3,
 ) -> tuple[pd.DataFrame, dict[str, float | int]]:
     """Generate expanding-window forecasts using earlier dates only."""
 
+    required = _required(spec, p_order, q_order)
+    if h1_daily is not None:
+        required = [name for name in required if name != "ect"]
+        required.extend(("previous_us_close", "log_kr_usd_cutoff"))
+        h1_daily = h1_daily.sort_values("date_us")
+        h1_dates = pd.to_datetime(h1_daily["date_us"])
     sample = (
         frame.replace([np.inf, -np.inf], np.nan)
-        .dropna(subset=["date_us", *_required(spec, p_order, q_order)])
+        .dropna(subset=["date_us", *required])
         .sort_values("date_us")
         .reset_index(drop=True)
     )
     if len(sample) <= min_train:
         raise ValueError(f"Need more than {min_train} complete rows; got {len(sample)}")
+    if sample["date_us"].duplicated().any():
+        raise ValueError("Expected one H2 observation per US session")
     records: list[dict[str, object]] = []
     for index in range(min_train, len(sample)):
         train = sample.iloc[:index]
         test = sample.iloc[[index]]
+        if h1_daily is not None:
+            cutoff = pd.Timestamp(test["date_us"].iloc[0])
+            h1, _ = fit_h1(h1_daily.loc[h1_dates.lt(cutoff)], (), max_h1_lags, diagnostics=False)
+            train = train.assign(ect=_equilibrium_error(train, h1))
+            test = test.assign(ect=_equilibrium_error(test, h1))
         x_train = _design(train, spec, p_order, q_order)
         x_test = _design(test, spec, p_order, q_order).reindex(
             columns=x_train.columns, fill_value=0.0
@@ -170,6 +187,7 @@ def walk_forward(
                 else math.nan
             ),
             "training_n": len(train),
+            "training_through": train["date_us"].iloc[-1],
             "signal_available_utc": (
                 test["forecast_cutoff_utc"].iloc[0]
                 if "forecast_cutoff_utc" in test
@@ -210,22 +228,46 @@ def walk_forward(
     return forecasts, metrics
 
 
-def common_comparison_dates(
-    overnight: pd.DataFrame, h2_summary: pd.DataFrame
-) -> set[object]:
-    """Return dates complete for the single retained H2 equation."""
-
-    row = h2_summary.loc[h2_summary["status"].eq("ok")].iloc[0]
-    spec = H2_SPECS[str(row["h2_spec"])]
-    required = [
-        "date_us",
-        "tradable_return_0925_0930",
-        *_required(spec, int(row["p_daily"]), int(row["q_five_minute"])),
-    ]
-    return set(
-        overnight.replace([np.inf, -np.inf], np.nan)
-        .dropna(subset=required)["date_us"]
+def _equilibrium_error(frame: pd.DataFrame, h1: dict[str, object]) -> pd.Series:
+    return (
+        np.log(frame["previous_us_close"])
+        - float(h1["intercept"])
+        - float(h1["theta"]) * frame["log_kr_usd_cutoff"]
     )
+
+
+def walk_forward_h2(
+    overnight: pd.DataFrame,
+    daily: pd.DataFrame,
+    spec: OvernightSpec,
+    min_train: int = 40,
+    max_p: int = 3,
+) -> tuple[pd.DataFrame, dict[str, float | int]]:
+    """Choose H2 lag order in the initial window, then refit H1 and H2 at each origin."""
+    if max_p not in range(1, 4):
+        raise ValueError("max_p must be between 1 and 3")
+    initial = (
+        overnight.replace([np.inf, -np.inf], np.nan)
+        .dropna(subset=[
+            "date_us", "overnight_return", "previous_us_close",
+            "log_kr_usd_cutoff", *spec.static_controls,
+        ])
+        .sort_values("date_us")
+    )
+    if min_train <= max_p + len(spec.static_controls) + 2 or len(initial) <= min_train:
+        raise ValueError(f"Invalid initial H2 training size {min_train} for {len(initial)} complete rows")
+    cutoff = pd.Timestamp(initial["date_us"].iloc[min_train])
+    daily = daily.sort_values("date_us")
+    prior_daily = daily.loc[pd.to_datetime(daily["date_us"]).lt(cutoff)]
+    h1, _ = fit_h1(prior_daily, (), max_p, diagnostics=False)
+    train = initial.iloc[:min_train]
+    train = train.assign(ect=_equilibrium_error(train, h1))
+    _, p_order, q_order = select_orders(train, spec, max_p, 0)
+    forecasts, metrics = walk_forward(
+        initial, spec, p_order, q_order, min_train,
+        h1_daily=daily, max_h1_lags=max_p,
+    )
+    return forecasts, {"p_daily": p_order, "q_five_minute": q_order, **metrics}
 
 
 def run_model(
@@ -242,12 +284,7 @@ def run_model(
     h1_summary = pd.DataFrame(
         [{"h1_spec": "bivariate", "status": "ok", "error": "", **h1_result}]
     )
-    h1_row = h1_summary.iloc[0]
-    overnight["ect"] = (
-        np.log(overnight["previous_us_close"])
-        - float(h1_row["intercept"])
-        - float(h1_row["theta"]) * overnight["log_kr_usd_cutoff"]
-    )
+    overnight["ect"] = _equilibrium_error(overnight, h1_result)
     overnight.to_parquet(output_data / "overnight.parquet", index=False)
 
     h2_name = "korean_ect_soxx_gauges"
@@ -288,20 +325,11 @@ def run_model(
         "added_controls_joint_p"
     ]
 
-    dates = common_comparison_dates(overnight, h2_summary)
-    if len(dates) <= min_train:
-        raise ValueError(
-            f"Retained overnight sample has {len(dates)} rows; "
-            f"need more than min_train={min_train}"
-        )
-    _, metrics = walk_forward(
-        overnight.loc[overnight["date_us"].isin(dates)],
-        spec,
-        p_order,
-        q_order,
-        min_train,
-    )
-    h2_summary["common_comparison_n"] = len(dates)
+    _, metrics = walk_forward_h2(overnight, daily, spec, min_train, max_p)
+    h2_summary["common_comparison_n"] = min_train + metrics["n_forecasts"]
+    h2_summary["forecast_max_p"] = max_p
+    h2_summary["forecast_p_daily"] = metrics.pop("p_daily")
+    h2_summary["forecast_q_five_minute"] = metrics.pop("q_five_minute")
     for column, value in metrics.items():
         h2_summary[column] = value
     h2_summary["forecast_rank"] = 1

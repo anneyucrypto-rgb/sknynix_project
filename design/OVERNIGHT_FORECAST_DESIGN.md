@@ -98,10 +98,10 @@ are stored as `h1_model.parquet` and `h2_model.parquet` under
 | --- | ---: |
 | Complete observations | 88 |
 | Expanding-window forecasts | 48 |
-| RMSE | 0.012906 |
-| MAE | 0.010055 |
-| Directional accuracy | 95.8% |
-| OOS \(R^2\) versus zero | 0.8930 |
+| RMSE | 0.013020 |
+| MAE | 0.010313 |
+| Directional accuracy | 97.9% |
+| OOS \(R^2\) versus zero | 0.8912 |
 | H2 adjustment coefficient \(\lambda\) | −0.226168 |
 | H2 adjustment p-value | \(8.63\times10^{-7}\) |
 | Selected \(p,q\) | 0, 0 |
@@ -113,11 +113,14 @@ and SOXX information.
 
 ## Expanding-window validation
 
-The reported full-sample equation is the retained specification. Forecast
-validation begins after 40 complete training observations. For each subsequent
-date, H2 is re-estimated using strictly earlier eligible dates. The 48 resulting
-forecasts are scored by RMSE, MAE, directional accuracy, and OOS \(R^2\)
-against a zero-return forecast.
+The displayed coefficients describe the full-sample fit. Forecast validation
+selects the H2 lag order by BIC in the initial 40-observation window. The
+selected forecast order is \(p=0,\ q=0\). At each forecast date, H1 is refitted
+on earlier daily observations, and its coefficients are used to calculate ECT
+for the training rows and the current forecast row. H2 is refitted on the
+expanding history and predicts one session ahead at 09:25 ET. The realized
+return enters training for the next forecast. The 48 forecasts are scored by
+RMSE, MAE, directional accuracy, and OOS \(R^2\) against a zero-return forecast.
 
 ## Chronos-2 walk-forward forecasting with LoRA
 

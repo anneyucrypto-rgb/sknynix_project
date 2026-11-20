@@ -1,7 +1,7 @@
 # Premarket-to-open trading results
 
 **Run ID:** `overnight-best`  
-**Generated:** 2026-11-19T05:41:51.999980+00:00  
+**Generated:** 2026-11-20T03:50:50.427050+00:00  
 **Forecast model:** retained bivariate-H1/SOXX-gauge H2  
 **Trading interval:** 09:25 premarket entry to 09:30 opening auction
 
@@ -14,10 +14,10 @@ The strategy uses H2 forecasts. H1 supplies only the equilibrium benchmark used 
 | H2 specification | `korean_ect_soxx_gauges` |
 | Complete observations | 88 |
 | Expanding-window forecasts | 48 |
-| RMSE | 0.012906 |
-| MAE | 0.010055 |
-| Forecast directional accuracy | 95.8% |
-| OOS R² versus zero | 0.8930 |
+| RMSE | 0.013020 |
+| MAE | 0.010313 |
+| Forecast directional accuracy | 97.9% |
+| OOS R² versus zero | 0.8912 |
 | H2 adjustment coefficient | -0.226168 |
 | H2 adjustment p-value | 8.63e-07 |
 
@@ -54,17 +54,17 @@ Only the executable 09:25–09:30 return is credited. The already-realized porti
 | Stop / take-profit / MOO exits | 2 / 0 / 2 |
 | Traded directional accuracy | 50.0% |
 | Win rate | 25.0% |
-| Net cumulative return | -0.29% |
-| CAGR | -1.52% |
-| Sharpe ratio | -2.9140 |
-| Sortino ratio | -2.9415 |
-| Calmar ratio | -4.5799 |
+| Net cumulative return | -0.28% |
+| CAGR | -1.48% |
+| Sharpe ratio | -2.8906 |
+| Sortino ratio | -2.9207 |
+| Calmar ratio | -4.5639 |
 | Maximum drawdown | -0.33% |
-| Realized risk-to-reward | 0.367 |
-| Profit factor | 0.122 |
+| Realized risk-to-reward | 0.377 |
+| Profit factor | 0.126 |
 | Average execution cost | 8.25 bps |
 | Initial fund | $10,000.00 |
-| Remaining fund | $9,970.93 |
+| Remaining fund | $9,971.56 |
 
 **Conclusion:** The strategy does not pass the minimum economic screen of at least three trades, positive net return, and positive Sharpe.
 

@@ -13,31 +13,25 @@ from src.config import PathSettings, feature_output_path
 def run_overnight_backtest(
     project_root: Path,
     *,
-    run_id: str = "overnight-best",
-    h1_spec: str = "bivariate",
-    h2_spec: str = "korean_ect_soxx_gauges",
+    run_id: str = "overnight-daily-ablation",
+    h1_spec: str = "daily_ardl_uecm",
+    h2_spec: str = "ablation_selected",
     min_train: int = 40,
 ) -> tuple[pd.DataFrame, dict[str, float | int | str]]:
     """Re-estimate the retained overnight equation on expanding windows."""
 
     from src.hypotheses.overnight_ablation import (
-        H2_SPECS,
-        walk_forward_h2,
+        nested_walk_forward_selection,
     )
 
     paths = PathSettings(project_root)
     data_dir = paths.feature_run(run_id)
-    h2 = pd.read_parquet(data_dir / "h2_model.parquet")
-    h2_row = h2.loc[
-        h2["h1_spec"].eq(h1_spec)
-        & h2["h2_spec"].eq(h2_spec)
-        & h2["status"].eq("ok")
-    ].iloc[0]
     overnight = pd.read_parquet(data_dir / "overnight.parquet")
-    daily = pd.read_parquet(paths.features / "daily" / "part-00000.parquet")
-    forecasts, forecast_metrics = walk_forward_h2(
-        overnight, daily, H2_SPECS[h2_spec], min_train,
-        max_p=int(h2_row.get("forecast_max_p", 3)),
+    forecasts, forecast_metrics, _ = nested_walk_forward_selection(
+        overnight,
+        min_train=min_train,
+        max_p=3,
+        max_q=3,
     )
     metrics: dict[str, float | int | str] = {
         "model": "overnight",
@@ -45,6 +39,8 @@ def run_overnight_backtest(
         "h2_spec": h2_spec,
         "common_comparison_n": min_train + len(forecasts),
         "initial_training_n": min_train,
+        "p_daily": -1,
+        "q_daily": -1,
         **forecast_metrics,
     }
     return forecasts, metrics
@@ -52,9 +48,9 @@ def run_overnight_backtest(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run-id", default="overnight-best")
-    parser.add_argument("--h1-spec", default="bivariate")
-    parser.add_argument("--h2-spec", default="korean_ect_soxx_gauges")
+    parser.add_argument("--run-id", default="overnight-daily-ablation")
+    parser.add_argument("--h1-spec", default="daily_ardl_uecm")
+    parser.add_argument("--h2-spec", default="ablation_selected")
     parser.add_argument("--min-train", type=int, default=40)
     parser.add_argument("--output", type=Path)
     return parser.parse_args()

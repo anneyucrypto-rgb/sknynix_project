@@ -267,16 +267,19 @@ class DatasetBuilder:
         return output
 
     def build_h1(self, max_lags: int = 5, controls: Iterable[str] = ("us_soxx_return", "kr_sector_return")) -> pd.DataFrame:
-        frame = self._require("daily").sort_values("date_us").copy()
-        frame = self._attach_controls(frame, controls)
-        frame["d_log_adr"] = frame["log_adr"].diff()
-        frame["d_log_kr_usd"] = frame["log_kr_usd"].diff()
-        for lag in range(1, max_lags + 1):
-            frame[f"log_adr_l{lag}"] = frame["log_adr"].shift(lag)
-            frame[f"log_kr_usd_l{lag}"] = frame["log_kr_usd"].shift(lag)
-            frame[f"d_log_adr_l{lag}"] = frame["d_log_adr"].shift(lag)
-            frame[f"d_log_kr_usd_l{lag}"] = frame["d_log_kr_usd"].shift(lag)
-        required = ["log_adr", "log_kr_usd", "log_adr_l1", "log_kr_usd_l1", "d_log_adr_l1", "d_log_kr_usd_l1"]
+        # H1 variable construction lives in one place.  Import lazily to keep
+        # the engine usable without loading the modelling stack at import time.
+        from src.hypotheses.h1 import prepare_uecm_data
+
+        control_names = tuple(controls)
+        frame = self._attach_controls(self._require("daily"), control_names)
+        frame = prepare_uecm_data(
+            frame,
+            max_p=max_lags,
+            max_q=max_lags,
+            controls=control_names,
+        )
+        required = ["a_d", "k_d", "delta_a", "delta_k", "a_l1", "k_l1"]
         frame["sample_eligible"] = frame[required].notna().all(axis=1)
         return frame
 

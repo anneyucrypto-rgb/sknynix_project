@@ -28,14 +28,21 @@ The retained overnight run materializes these linked artifacts:
 
 | Artifact | Purpose |
 | --- | --- |
-| `features/daily/part-00000.parquet` | Reusable paired daily data used to estimate the retained H1 equilibrium |
-| `features/overnight_h2/part-00000.parquet` | Standalone H2 input including point-in-time FX |
-| `features/overnight/part-00000.parquet` | Standalone Chronos-2 target and covariates with execution fields |
-| `features/experiments/run_id=overnight-best/overnight.parquet` | One date per close-to-open target with previous-close ECT inputs, Korean return, two SOXX gauges, and executable prices |
-| `features/experiments/run_id=overnight-best/h1_model.parquet` | Retained bivariate H1 estimates |
-| `features/experiments/run_id=overnight-best/h2_model.parquet` | Retained Korean-return/ECT/SOXX-gauge H2 estimates |
-| `features/experiments/run_id=overnight-best/overnight_backtest.parquet` | Retained H2 expanding-window predictions and executable fields |
-| `features/experiments/run_id=overnight-best/premarket_to_open_strategy.parquet` | Net 09:25–09:30 strategy path |
+| `features/daily/part-00000.parquet` | Unified daily H1/H2 close-to-open target, FX-adjusted Korean return, and control candidates |
+| `features/overnight_h2/part-00000.parquet` | Alias snapshot of the unified daily H1/H2 panel |
+| `features/experiments/run_id=chronos-2/features.parquet` | Chronos-2 close-to-open target plus daily Korean FX-adjusted, VIX, FLKR, and USD/KRW returns |
+| `features/experiments/run_id=chronos-2/forecasts.parquet` | Leakage-safe expanding-window Chronos-2 forecasts |
+| `features/experiments/run_id=forecast-comparison/forecast_metrics.parquet` | Common-date Chronos-2 versus fixed VIX-only H1/H2 forecast metrics |
+| `features/experiments/run_id=forecast-comparison/*_common_forecasts.parquet` | Model-specific files restricted to the common evaluation dates |
+| `features/experiments/run_id=forecast-comparison/forecast_strategies.parquet` | Common-date strategy implementation evaluated separately for both forecast models |
+| `features/experiments/run_id=overnight-daily-ablation/overnight.parquet` | One date per close-to-open target with daily predictor and control candidates |
+| `features/experiments/run_id=overnight-daily-ablation/h1_model.parquet` | Long-run level equilibrium used to construct the pre-response ECT |
+| `features/experiments/run_id=overnight-daily-ablation/h2_model.parquet` | Selected daily ECM with controls, p/q orders, ECT lambda, and validation metrics |
+| `features/experiments/run_id=overnight-daily-ablation/control_ablation.parquet` | Full-sample coefficient comparison; nested forecast selection is audited separately |
+| `features/experiments/run_id=overnight-daily-ablation/nested_selection_audit.parquet` | Origin-level H1/ECT, p/q, eligibility, inner RMSE, one-SE, and selection audit |
+| `features/experiments/run_id=overnight-daily-ablation/proxy_redundancy_analysis.parquet` | All seven nonempty EWY/FLKR/USD-KRW subset comparisons |
+| `features/experiments/run_id=overnight-daily-ablation/proxy_redundancy_diagnostics.parquet` | Proxy correlations and VIF diagnostics |
+| `features/experiments/run_id=overnight-daily-ablation/overnight_backtest.parquet` | Frozen-specification expanding-window H2 predictions |
 
 Build the standalone feature tables with `python -m src.features.h1_h2` and
 `python -m src.features.chronos_2`. Model estimates, forecasts, strategy paths,

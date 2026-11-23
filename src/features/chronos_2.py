@@ -1,15 +1,42 @@
-"""Materialize the standalone Chronos-2 overnight feature table."""
+"""Materialize daily Chronos-2 inputs for the SKHY overnight return."""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
+import pandas as pd
+
 from src.config import PROJECT_ROOT, feature_output_path
-from src.features.utils import build_overnight_features, write_feature_table
+from src.features.h1_h2 import build_h1_h2_features
+from src.features.utils import write_feature_table
 
 
-CHRONOS_FEATURE_PATH = PROJECT_ROOT / "data" / "features" / "overnight" / "part-00000.parquet"
+CHRONOS_FEATURE_PATH = (
+    PROJECT_ROOT
+    / "data"
+    / "features"
+    / "experiments"
+    / "run_id=chronos-2"
+    / "features.parquet"
+)
+CHRONOS_COLUMNS = (
+    "date_us",
+    "overnight_return",
+    "kr_fx_adjusted_return",
+    "vix_daily_return",
+    "kr_proxy_flkr_return",
+    "kr_proxy_usdkrw_return",
+)
+
+
+def build_chronos_features() -> pd.DataFrame:
+    """Return the daily target and point-in-time covariates used by Chronos-2."""
+    frame = build_h1_h2_features()
+    missing = set(CHRONOS_COLUMNS).difference(frame)
+    if missing:
+        raise ValueError(f"Chronos-2 feature inputs are missing {sorted(missing)}")
+    return frame[list(CHRONOS_COLUMNS)].copy()
 
 
 def main() -> None:
@@ -18,7 +45,7 @@ def main() -> None:
     args = parser.parse_args()
 
     output = feature_output_path(args.output)
-    frame = build_overnight_features()
+    frame = build_chronos_features()
     write_feature_table(frame, output)
     print(f"Wrote {len(frame)} overnight feature rows to {output}")
 

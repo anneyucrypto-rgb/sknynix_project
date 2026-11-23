@@ -528,7 +528,7 @@ def _write_forecast_comparison(
     lines = [
         "# Premarket-to-open forecast strategy results",
         "",
-        "Each forecast file was evaluated independently under the 09:25–09:30 ET rules.",
+        "Both common-date forecast files were evaluated independently under the same 09:25–09:30 ET rules.",
         "",
         "## Close-to-open forecast accuracy",
         "",
@@ -569,6 +569,19 @@ def _write_forecast_comparison(
             f"({row.strategy_observations}) | {row.excluded_sessions} | {row.active_trades} "
             f"| {row.total_return:.2%} | {sharpe} | ${row.ending_fund:,.2f} |"
         )
+    passed = summary.loc[
+        summary["active_trades"].ge(3)
+        & summary["total_return"].gt(0)
+        & summary["sharpe_ratio"].gt(0),
+        "forecast_model",
+    ].tolist()
+    conclusion = (
+        "Models passing the minimum screen (at least three trades, positive net "
+        f"return, and positive Sharpe): {', '.join(passed)}."
+        if passed
+        else "Neither model passes the minimum screen of at least three trades, positive net return, and positive Sharpe."
+    )
+    lines.extend(["", f"**Conclusion:** {conclusion}"])
     lines.extend([
         "",
         "## Trade breakdown",

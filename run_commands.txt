@@ -13,30 +13,31 @@ python -m src.ingestion.economic_data --start-date 2020-01-01 --end-date 2026-11
 # Force a complete U.S. bar refresh instead of downloading only uncovered dates.
 python -m src.ingestion.massive_us --start-date 2026-06-01 --end-date 2026-11-17 --refresh-all
 
-# Build the paired daily H1 and point-in-time overnight H2 input tables.
+# Build the unified daily H1/H2 overnight-return input table.
 python -m src.features.h1_h2
 
-# Fit the only retained model: bivariate H1 plus Korean-return/ECT/SOXX-gauge H2.
-python -m src.hypotheses.overnight_ablation --run-id overnight-best --max-p 3 --max-q 0 --min-train 40
+# Estimate H1 directly, including bounds inference and rolling stability.
+python -m src.hypotheses.h1 --max-p 3 --max-q 3 --rolling-window 60 --bootstrap-replications 499
+
+# Fit H1 inside the forecast workflow and rank H2 controls after selecting p/q by BIC.
+python -m src.hypotheses.overnight_ablation --run-id overnight-daily-ablation --max-p 3 --max-q 3 --min-train 40
 
 # Reproduce its expanding-window H2 forecasts.
-python -m backtest.backtest --run-id overnight-best --h1-spec bivariate --h2-spec korean_ect_soxx_gauges --min-train 40
-
-# Enter at 09:25 and liquidate surviving positions in the 09:30 auction.
-python -m backtest.strategy --run-id overnight-best --calibration-observations 10 --safety-buffer-bps 10 --transaction-cost-bps-per-side 1 --slippage-bps-per-side 3 --impact-coefficient-bps 10 --risk-aversion 0.0025 --max-weight 1 --stop-loss-sigma 0.75 --take-profit-sigma 1.5 --drawdown-pause-pct 1 --pause-sessions 5 --hard-drawdown-stop-pct 5 --initial-fund 10000 --minimum-fund 9000
+python -m backtest.backtest --run-id overnight-daily-ablation --h1-spec daily_ardl_uecm --h2-spec ablation_selected --min-train 40
 
 # Run automated tests.
 python -m pytest -q
 
-# Optional Chronos-2 forecast workflow. Build its standalone input after
-# populating the raw SKHY, SOXX, and Korean market Parquet files.
+# Optional Chronos-2 forecast workflow. Build its standalone daily input after
+# populating SKHY, Korean shares, VIX, FLKR, and USD/KRW source data.
 python -m pip install "chronos-forecasting>=2.2,<3" peft
 python -m src.features.chronos_2
 
-# Forecast SKHY's overnight return using the Korean day return and two SOXX gauges.
+# Forecast SKHY's overnight return using Korean FX-adjusted, VIX, FLKR, and
+# USD/KRW daily returns.
 # Start with 40 complete observations and continue LoRA training for 50 steps
 # before each one-session-ahead forecast as the realized history expands.
-# The output includes simulated 09:30 ET entries and uses CUDA when available.
+# The output includes forecast quantiles and uses CUDA when available.
 # The first run saves base weights to .model_cache/chronos-2 for offline reuse.
 # The final adapter and its training cutoff are saved under .model_cache/chronos-2-finetuned.
 python -m backtest.chronos_2 --min-train 40 --steps 50 --output data/features/experiments/run_id=chronos-2/forecasts.parquet
@@ -44,8 +45,11 @@ python -m backtest.chronos_2 --min-train 40 --steps 50 --output data/features/ex
 # Optional smoke check. Run one LoRA step for the first forecast only.
 python -m backtest.chronos_2 --min-train 40 --steps 1 --max-forecasts 1 --output data/features/experiments/run_id=chronos-2/forecasts-smoke.parquet
 
+# Compare Chronos-2 against the fixed VIX-only H1/H2 ECM on common dates.
+python -m backtest.forecast_comparison --min-train 40
+
 # Backtest H2 and Chronos-2 independently under the same 09:25–09:30 rules.
 # Repeat --forecast MODEL PARQUET for each model. Forecast-only files are
 # joined with SKHY execution data by session date. The summary has one row per model.
 # Parquet tables go under data/features/ and Markdown summaries go under reports/.
-python -m backtest.strategy --forecast h2 data/features/experiments/run_id=overnight-best/overnight_backtest.parquet --forecast chronos-2 data/features/experiments/run_id=chronos-2/forecasts.parquet --output data/features/experiments/forecast_comparison.parquet
+python -m backtest.strategy --forecast h2-vix data/features/experiments/run_id=forecast-comparison/h2_vix_common_forecasts.parquet --forecast chronos-2 data/features/experiments/run_id=forecast-comparison/chronos_common_forecasts.parquet --output data/features/experiments/run_id=forecast-comparison/forecast_strategies.parquet

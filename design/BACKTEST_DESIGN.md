@@ -4,8 +4,8 @@
 
 | Time (ET) | Event |
 | --- | --- |
-| Before 09:25 | Korean daily return, previous-close ECT, and both SOXX gauges are known |
-| 09:25 | Freeze H2 forecast using no 09:30 information; enter in premarket |
+| Before 09:25 | Korean FX-adjusted return, daily VIX/FLKR/USD-KRW returns, and the previous-close ECT are known |
+| 09:25 | Freeze the model forecast using no 09:30 information; enter in premarket |
 | 09:25–09:27 | A protective stop-loss or take-profit may execute from one-minute high/low paths |
 | Before 09:28 | Submit opposite-side MOO for any remaining position |
 | 09:28–09:30 | No new protective exit is assumed after the MOO is locked |
@@ -24,20 +24,25 @@ r^{trade}_d=\log\left(
 The backtest never credits the strategy with the already-realized portion of
 the overnight gap.
 
-## Step 1 — Expanding H2 gap forecast
+## Step 1 — Expanding full-gap forecasts
 
-For each date \(d\), estimate the retained SOXX-gauge H2 with dates strictly
-before \(d\), then calculate the 09:25 gap nowcast \(\widehat r^{ON}_d\). H1
-supplies the previous-close equilibrium error
+The comparison evaluates two forecasts of the same SKHY previous-close-to-open
+target. The fixed H1/H2 benchmark uses the daily Korean FX-adjusted return, its
+re-estimated ECT, and the daily VIX return with p=q=0. Chronos-2 uses the daily
+Korean FX-adjusted, VIX, FLKR, and USD/KRW returns. Both use an initial 40-row
+training window and dates strictly before \(d\) for estimation or fine-tuning.
+
+For H1/H2, H1 supplies the previous-close equilibrium error
 
 \[
 ECT_d=\log(P^{SKHY}_{d-1,close})
 -\widehat c-\widehat\theta\log(P^{KR,USD}_d),
 \]
 
-while H2 combines it with the Korean daytime return and the SOXX
-close-to-07:00 and 07:00-to-09:25 gauges. H2—not H1 directly—supplies the
-return forecast.
+while H2 combines it with the Korean return and VIX return. H2—not H1
+directly—supplies the return forecast. Chronos-2 supplies its own one-step
+forecast from the four daily covariates. Forecast statistics are compared on
+common dates only.
 
 ## Step 2 — Prior-only calibration to remaining return
 
@@ -148,13 +153,21 @@ Calmar, maximum drawdown, directional accuracy, win rate, profit factor,
 configured and realized risk-reward, average exposure, execution cost, stop and
 take-profit counts, pause events, and ending fund.
 
-The retained strategy passes its minimum economic screen only if it generates
-at least three trades, positive total return, and positive Sharpe. The screen
-does not select among models because the SOXX-gauge H2 is the only retained
-forecast specification.
+Each model's strategy passes its minimum economic screen only if it generates
+at least three trades, positive total return, and positive Sharpe. Strategy
+evaluation is comparative, not a second forecast-model selection step.
 
-The current retained-model performance is written to
-`reports/TRADING_RESULTS.md` whenever `python -m backtest.strategy` completes.
+The current two-model performance is written to
+`reports/forecast_strategies_summary.md` when the comparison command in
+`run_commands.txt` completes.
+
+## Current comparison result
+
+Both models were evaluated over the same 49 sessions from 2026-09-09 through
+2026-11-16. H1/H2 generated two trades, returned -0.12%, and ended at
+$9,988.24. Chronos-2 generated three trades, returned -0.31%, and ended at
+$9,968.78. Sharpe ratios were -3.00 and -2.92, respectively. Neither strategy
+passes the minimum economic screen; these results do not support live trading.
 
 ## Auction-data caveat
 

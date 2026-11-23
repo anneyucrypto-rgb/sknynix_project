@@ -293,10 +293,10 @@ CONTRACTS: dict[str, DatasetContract] = {
         "one eligible daily observation",
         ("date_us",),
         (
-            "date_us", "log_adr", "log_kr_usd", "d_log_adr", "d_log_kr_usd",
-            "log_adr_l1", "log_kr_usd_l1", "d_log_adr_l1", "d_log_kr_usd_l1",
-            "sample_eligible",
+            "date_us", "a_d", "k_d", "delta_a", "delta_k", "a_l1",
+            "k_l1", "sample_eligible",
         ),
+        description="Daily ARDL--UECM inputs for the H1 level relationship",
     ),
     "h2": DatasetContract(
         "h2",

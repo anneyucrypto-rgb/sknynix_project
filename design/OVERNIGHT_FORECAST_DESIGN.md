@@ -1,218 +1,191 @@
-# SKHY overnight forecasting
+# Daily H1/H2 overnight-return design
 
-## Objective and information cutoff
+## Target and primary predictor
 
-For U.S. session date \(d\), H2 and Chronos-2 forecast the full SKHY
-close-to-open gap:
-
-\[
-r^{ON}_{d}=\log\left(
-\frac{P^{SKHY}_{d,09{:}30\ open}}
-{P^{SKHY}_{d-1,16{:}00\ close}}
-\right).
-\]
-
-The forecast is frozen at 09:25 ET. The 09:30 opening price is never available
-to the model. The completed Korean session is daily. SOXX is intraday, but its
-two retained controls are aggregate point-in-time gauges rather than lagged
-five-minute blocks.
-
-The bivariate-H1/SOXX-gauge equation is the retained H2 specification.
-Chronos-2 uses the Korean day return and the two SOXX gauges in a separate
-walk-forward forecast.
-
-## H1: bivariate equilibrium
-
-H1 is the daily bivariate ARDL–UECM between SKHY and the FX-adjusted Korean
-ordinary share. BIC chooses the ARDL orders, subject to at least one lag of
-each level variable. H1 estimates the long-run intercept \(\widehat c\) and
-slope \(\widehat\theta\).
-
-Let \(a_d=\log(P^{SKHY}_{d,close})\) and
-\(k_d=\log(0.1P^{KR}_{d,close}/USDKRW_d)\), using the project's ADR conversion
-factor of 0.1. The retained run selected ARDL order \((1,2)\), yielding the
-unrestricted error-correction equation
+For U.S. session date \(d\), both hypotheses use the SKHY close-to-open log
+return:
 
 \[
-\Delta a_d=\alpha+\rho_a a_{d-1}+\rho_k k_{d-1}
-+\gamma_0\Delta k_d+\gamma_1\Delta k_{d-1}+\varepsilon_d.
+r^{ON}_d=\log(P^{SKHY}_{d,09:30\ open}/P^{SKHY}_{d-1,close}).
 \]
 
-| H1 measure | Result |
-| --- | ---: |
-| Long-run intercept \(\widehat c\) | 1.527827 |
-| Long-run slope \(\widehat\theta\) | 0.745721 |
-| Adjustment coefficient \(\rho_a\) | −0.440395 |
-| Adjustment p-value | \(1.45\times10^{-4}\) |
-| Bounds-test F statistic | 9.2129 |
-| Bounds upper-tail p-value | \(3.71\times10^{-4}\) |
-
-For H2 date \(d\), the equilibrium error is fixed before the current U.S.
-opening:
+The primary predictor is the daily log return of the Korean ordinary share
+converted to U.S. dollars at the Korean close:
 
 \[
-ECT_d=\log(P^{SKHY}_{d-1,close})
--\widehat c
--\widehat\theta\log(P^{KR,USD}_d).
+r^{KR,FX}_d=\Delta\log(0.1P^{000660,KRW}_d/USDKRW_d).
 \]
 
-Here \(P^{SKHY}_{d-1,close}\) is the prior SKHY regular-session close and
-\(P^{KR,USD}_d=0.1P^{KR}_{d,close}/USDKRW_{d,09{:}25}\). H1 supplies this
-equilibrium benchmark. It does not directly generate the return forecast.
+The Korean session is joined to the next eligible U.S. open by its 15:30 KST
+availability. The 0.1 ADS ratio is a constant and therefore does not alter the
+return, but it keeps the converted price economically interpretable.
 
-## H2: retained SOXX-gauge equation
+## H1
 
-H2 produces the overnight-return forecast:
+H1 estimates the pre-open long-run level relation with the daily ARDL--UECM
+defined in [`h1.md`](h1.md). The long-run slope is
+`-rho_k/rho_a`, and the equilibrium error is oriented as SKHY minus its fitted
+equilibrium. Positive ECT therefore means SKHY is above equilibrium, so
+convergence in H2 requires a negative adjustment coefficient.
+
+## H2 and control ablation
+
+H2 estimates:
 
 \[
-\boxed{
-\widehat r^{ON}_d=
-0.005001
-+0.340554r^{KR,day}_d
--0.226168ECT_d
-+0.779940r^{SOXX,close\rightarrow07{:}00}_d
-+1.184007r^{SOXX,07{:}00\rightarrow09{:}25}_d
-}
+r^{ON}_d=\alpha+\lambda ECT_d+\beta r^{KR,FX}_d+
+\sum_{i=1}^{p}\phi_i r^{ON}_{d-i}+
+\sum_{j=1}^{q}\delta_j r^{KR,FX}_{d-j}+\gamma'Controls_d+\epsilon_d.
 \]
 
-where:
+It tries these daily control groups:
 
-- \(r^{KR,day}_d=\log(P^{KR}_{d,close}/P^{KR}_{d,open})\) is known after the
-  Korean market closes;
-- \(r^{SOXX,close\rightarrow07{:}00}_d\) measures SOXX from its previous
-  regular close to the last price available at 07:00 ET; and
-- \(r^{SOXX,07{:}00\rightarrow09{:}25}_d\) measures SOXX from 07:00 to the
-  last price available at the 09:25 cutoff.
+- completed SOXX close-to-close return;
+- prior completed daily normalized SKHY news sentiment;
+- Korean semiconductor ETF, KOSDAQ, and KOSPI daily returns;
+- daily Korean market-proxy returns; a within-group redundancy check compares
+  EWY, FLKR, and USD/KRW, while the operational group retains FLKR and USD/KRW;
+- released U.S. CPI YoY and core-CPI change;
+- compact daily U.S. funding-condition spreads and changes;
+- completed VIX daily return; and
+- daily 2-year and 10-year Treasury yield changes.
 
-BIC selected \(p=0\) and \(q=0\). Therefore, no lagged overnight-return terms
-and no lagged SOXX-gauge terms enter the final equation.
+The ablation study estimates each source group alone, the all-control model,
+and every leave-one-group-out model. Selection is nested at every outer
+forecast origin. Using prior rows only, H1 is re-estimated, the ECT is rebuilt,
+and BIC selects p and q from 0 through 3 within each control specification. A
+specification is eligible when \(-2<\lambda<0\), HAC \(p_\lambda<0.05\),
+\(\beta_{KR,FX}>0\), and HAC \(p_\beta<0.05\). Eligible models are ranked by
+inner expanding-window RMSE. The simplest model whose mean squared loss is
+within one standard error of the best model is selected; MAE, direction
+accuracy, coefficient stability, and BIC are ordered tie-breakers.
 
-## Retained H2 statistical results
+Grouping prevents individual fields from a multi-column source from being
+cherry-picked. The complete candidate table is written to
+`control_ablation.parquet`.
 
-The H1 and H2 estimates and validation metrics shown here come from
-`overnight-best`, reported on 19 November 2026. Run-specific model artifacts
-are stored as `h1_model.parquet` and `h2_model.parquet` under
-`data/features/experiments/run_id=overnight-best/`.
+## Daily availability rules
 
-| Measure | Result |
-| --- | ---: |
-| Complete observations | 88 |
-| Expanding-window forecasts | 48 |
-| RMSE | 0.013020 |
-| MAE | 0.010313 |
-| Directional accuracy | 97.9% |
-| OOS \(R^2\) versus zero | 0.8912 |
-| H2 adjustment coefficient \(\lambda\) | −0.226168 |
-| H2 adjustment p-value | \(8.63\times10^{-7}\) |
-| Selected \(p,q\) | 0, 0 |
+The model matrix has one row per U.S. session date. Intraday timestamps are
+used only while constructing the overnight target and enforcing availability;
+they are removed from the feature table.
 
-The negative, highly significant H2 adjustment coefficient is consistent with
-overnight correction toward the bivariate H1 equilibrium. Return forecasting
-uses H2: H1 estimates the benchmark, while H2 combines it with current Korean
-and SOXX information.
+- Korean close data are eligible after 15:30 KST.
+- U.S. market and economic daily observations are eligible the following day.
+- A completed U.S. calendar day's sentiment is eligible the following midnight.
+- Inflation source rows do not contain release timestamps, so the 15th of the
+  following month is the explicit conservative availability convention.
+- Missing supplied CPI YoY values are derived from the CPI index.
 
-## Expanding-window validation
+No 07:00 or 09:25 anchor, premarket gauge, or anchor-relative return is used.
 
-The displayed coefficients describe the full-sample fit. Forecast validation
-selects the H2 lag order by BIC in the initial 40-observation window. The
-selected forecast order is \(p=0,\ q=0\). At each forecast date, H1 is refitted
-on earlier daily observations, and its coefficients are used to calculate ECT
-for the training rows and the current forecast row. H2 is refitted on the
-expanding history and predicts one session ahead at 09:25 ET. The realized
-return enters training for the next forecast. The 48 forecasts are scored by
-RMSE, MAE, directional accuracy, and OOS \(R^2\) against a zero-return forecast.
+## Current materialized run
 
-## Chronos-2 walk-forward forecasting with LoRA
+Run `overnight-daily-ablation` uses a common 86-observation estimation sample
+and 40 initial training observations for forecast diagnostics. The lambda
+selection chooses the `vix` specification at all 46 outer origins. At the last
+origin it uses \(p=0\), \(q=0\), \(\lambda=-0.326532\), and HAC
+\(p_\lambda=3.998\times10^{-13}\). The nested forecasts have RMSE 0.020632,
+MAE 0.016150, directional accuracy 89.13%, and zero-benchmark out-of-sample
+\(R^2\) of 0.727496. These figures describe the current short
+sample and must not be treated as a stable production estimate.
 
-[backtest/chronos_2.py](../backtest/chronos_2.py) forecasts one U.S. session
-ahead with the pretrained Amazon Chronos-2 checkpoint. Its target is the same
-SKHY log return \(r^{ON}_d\), stored as `overnight_return`. Its inputs are
-historical target returns and the three covariates below. The feature builder
-computes them from the original SKHY and SOXX one-minute Parquet files and the
-Korean daily Parquet files, and writes a standalone panel under
-`data/features/overnight/`.
+## Chronos-2 benchmark
 
-| Covariate | Information available at the forecast cutoff |
-| --- | --- |
-| Korean day return | Completed Korean open-to-close return |
-| SOXX overnight gauge | Prior regular close to the last price available at 07:00 ET |
-| SOXX premarket gauge | 07:00 ET to the last price available at 09:25 ET |
+Chronos-2 forecasts the same daily close-to-open target using four daily
+covariates: the FX-adjusted Korean ordinary-share return, the VIX return, the
+FLKR return, and the USD/KRW return. Its expanding-window run begins with 40
+training observations. At every forecast origin, the LoRA adapter is fit using
+prior observations only; the current-date covariates are supplied as known
+future covariates for the one-step forecast.
 
-1. Sort by U.S. session date and begin forecasting after 40 complete prior
-   observations by default. A training row needs the realized overnight return
-   and all predictor inputs. A forecast row needs the predictor inputs.
-2. Start from the pretrained checkpoint and train a LoRA adapter on the initial
-   history. Continue training the same adapter weights at each later origin
-   using the expanding history and a new optimizer. Each default fit uses 50
-   optimization steps, a learning
-   rate of \(10^{-5}\), and a minimum training context of eight observations.
-   Each historical training window supplies past returns and covariates as
-   context and the covariates known at the forecasted step as conditioning
-   inputs. The realized return at that step is the training label.
-3. At inference, supply the historical context and the three covariate values
-   for \(d\). Generate the 10th, 50th, and 90th percentiles of the one-step
-   return forecast. Use the median as the point forecast. The current return
-   and opening price are excluded from the model inputs.
-4. In the historical simulation, a positive median signals a long entry and a
-   negative median signals a short entry at the 09:30 ET open. A zero median
-   produces no entry. Record the simulated entry price when the open is
-   available. The opening price determines the realized forecast target, which
-   joins the training history at the next origin if the row is complete.
+### True nested expanding-window fine-tuning
 
-The Chronos-2 output contains forecast quantiles, realized overnight returns,
-training cutoffs, and simulated opening entries. The close-to-open return is a
-forecast target. A position entered at the open would need a subsequent exit
-price to measure its trading return.
+Let (t) denote an outer forecast origin, (y_t=r^{ON}_t), and let
+(x_t) contain the four covariates. The training information set is
 
-After the last forecast, the final training update includes that session's
-realized return if available. The adapter and its training cutoff are saved
-under `.model_cache/chronos-2-finetuned/`. Each historical evaluation starts
-from the pretrained base to keep the training cutoff valid at every origin.
+\[
+\mathcal H_t=\{(y_s,x_s):s<t\}.
+\]
 
-Run from the repository root after preparing the raw market inputs listed
-in [run_commands.txt](../run_commands.txt).
+The histories are nested:
 
-```powershell
-python -m src.features.chronos_2
-python -m backtest.chronos_2 --min-train 40 --steps 50 --output data/features/experiments/run_id=chronos-2/forecasts.parquet
+\[
+\mathcal H_{t_1}\subset\mathcal H_{t_2}\subset\cdots,
+\]
+
+but (y_t) is never included before the forecast for (t) is fixed. The
+implemented algorithm is:
+
+1. Sort the panel by U.S. session date, require all four covariates, and admit
+   an origin only after at least 40 earlier nonmissing targets.
+2. Load the same pretrained `amazon/chronos-2` base checkpoint. Its base
+   weights remain frozen; only LoRA adapter weights are optimized. The base is
+   not replaced by a model trained on the full evaluation sample.
+3. At the first origin, initialize a LoRA adapter over the base model. At every
+   later origin, Chronos creates a fresh PEFT wrapper over that same base and a
+   training callback restores the adapter state produced at the preceding
+   origin. Thus the optimization is warm-started causally; no adapter trained
+   at a later date is used for an earlier forecast.
+4. Fine-tune the adapter on the complete prior-only history
+   (mathcal H_t). The configured fit uses a one-step prediction length, 50
+   optimizer steps, learning rate (10^{-5}), batch size 16, minimum past
+   context 8, and seed 42. The historical target and covariate sequences form
+   the training windows. Because the complete expanding history is presented
+   again at every origin, earlier observations may contribute to multiple
+   optimizer updates; this is intentional warm-started expanding-window
+   training.
+5. Copy the fitted LoRA weights to CPU memory as the only state carried into
+   the next origin. Optimizer state is not carried forward.
+6. Forecast (y_t) from (mathcal H_t) and the already available (x_t),
+   supplied as one-step future covariates. Chronos returns the 10th, 50th, and
+   90th percentiles; the median is the point forecast.
+7. Store the forecast before exposing (y_t). The realized target is used only
+   for scoring and becomes eligible for training at origin (t+1).
+8. After the final historical forecast is fixed, perform one final adapter fit
+   including that last realized target and save the adapter plus its
+   `train_through` date. This deployment checkpoint does not alter any reported
+   historical forecast.
+
+In pseudocode:
+
+```text
+adapter = None
+for t in eligible_forecast_dates:
+    history = rows strictly before t with observed target
+    model = fresh LoRA wrapper(pretrained_base)
+    restore model adapter from adapter, if one exists
+    model.fit(history, fixed_hyperparameters)
+    adapter = copy(model.adapter_weights)
+    forecast[t] = model.predict(history, known_covariates[t])
+    reveal target[t] only after forecast[t] is stored
+final_adapter = fit(history including the last revealed target)
 ```
 
-## Executable premarket-to-open strategy
+Here “nested” refers to the strictly nested outer training histories and the
+origin-by-origin refit. It does **not** mean that Chronos hyperparameters are
+selected by an additional inner cross-validation loop: the LoRA mode, step
+count, learning rate, batch size, minimum context, and quantiles are fixed
+before the outer evaluation. Consequently, the run is a leakage-safe nested
+walk-forward fine-tuning exercise, not nested hyperparameter optimization.
 
-The trading return is narrower than the H2 target:
+For a fair benchmark, `backtest.forecast_comparison` compares Chronos-2 with a
+fixed VIX-only H1/H2 specification with p=q=0. H1 and the ECT are still
+re-estimated at every H1/H2 forecast origin. Metrics are calculated only over
+the intersection of forecast dates, so neither model benefits from a longer
+evaluation sample.
 
-\[
-r^{trade}_d=\log\left(
-\frac{P^{SKHY}_{d,09{:}30\ open}}
-{P^{SKHY}_{d,09{:}25\ entry}}
-\right).
-\]
+The current 49-date common sample runs from 2026-09-09 through 2026-11-16.
+H1/H2 has RMSE 0.020878, MAE 0.017021, directional accuracy 83.67%, and
+zero-benchmark OOS \(R^2=0.715039\). Chronos-2 has RMSE 0.029204, MAE
+0.022356, directional accuracy 73.47%, and OOS \(R^2=0.442446\). Thus H1/H2
+has 28.5% lower RMSE and is the stronger forecast on this short sample.
 
-The strategy proceeds as follows:
-
-1. Freeze the retained H2 full-gap forecast at 09:25 ET.
-2. Using earlier forecast/return pairs only, calibrate the H2 full-gap forecast
-   to an expected remaining 09:25–09:30 return and residual volatility.
-3. Enter at the 09:25 SKHY premarket open only if expected remaining profit
-   exceeds transaction costs, two-sided slippage, square-root impact, and the
-   safety buffer.
-4. Scale the position by expected return divided by predicted variance, capped
-   at 100% gross exposure.
-5. Apply volatility-scaled stop-loss and take-profit levels through 09:27.
-6. Submit an opposite-side MOO before 09:28 for every surviving position and
-   exit in the 09:30 opening auction.
-7. Enforce portfolio drawdown pauses, a hard drawdown stop, and a minimum-fund
-   floor.
-
-Only the executable 09:25–09:30 return is credited. The strategy never claims
-the portion of the overnight gap already realized by 09:25. Transaction costs,
-slippage, market impact, and risk controls are included.
-
-The [trading results](../reports/TRADING_RESULTS.md) report the execution metrics for
-the H2 premarket-to-open strategy.
-
-Nasdaq's MOO timing is documented in the
-[Nasdaq Opening/Closing Cross FAQ](https://beta.nasdaqtrader.com/content/ProductsServices/Trading/Crosses/openclose_faqs.pdf).
-The Massive one-minute 09:30 open is used as an opening-auction proxy; official
-Nasdaq opening prices and order-level fills are required for production-grade
-execution validation.
+```text
+python -m src.features.h1_h2
+python -m src.hypotheses.overnight_ablation --run-id overnight-daily-ablation --max-p 3 --max-q 3 --min-train 40
+python -m backtest.backtest --run-id overnight-daily-ablation --min-train 40
+python -m src.features.chronos_2
+python -m backtest.chronos_2 --min-train 40 --steps 50
+python -m backtest.forecast_comparison --min-train 40
+```

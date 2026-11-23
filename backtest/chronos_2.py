@@ -1,4 +1,4 @@
-"""Walk-forward SKHY close-to-open forecasts and simulated 09:30 ET entries."""
+"""Walk-forward Chronos-2 forecasts for the daily SKHY close-to-open return."""
 
 from __future__ import annotations
 
@@ -18,7 +18,12 @@ from src.features.chronos_2 import CHRONOS_FEATURE_PATH
 
 
 TARGET = "overnight_return"
-COVARIATES = ("kr_day_return", "soxx_extended_return", "soxx_premarket_return")
+COVARIATES = (
+    "kr_fx_adjusted_return",
+    "vix_daily_return",
+    "kr_proxy_flkr_return",
+    "kr_proxy_usdkrw_return",
+)
 BASE_MODEL_ID = "amazon/chronos-2"
 BASE_MODEL_DIR = PROJECT_ROOT / ".model_cache" / "chronos-2"
 FINETUNED_CACHE = PROJECT_ROOT / ".model_cache" / "chronos-2-finetuned"
@@ -83,7 +88,7 @@ def walk_forward(
     from peft import get_peft_model_state_dict, set_peft_model_state_dict
     from transformers import TrainerCallback
 
-    required = {"date_us", "forecast_cutoff_utc", TARGET, *COVARIATES}
+    required = {"date_us", TARGET, *COVARIATES}
     missing = required.difference(overnight)
     if missing:
         raise ValueError(f"Overnight feature Parquet is missing columns {sorted(missing)}")
@@ -160,23 +165,19 @@ def walk_forward(
             if not np.isfinite([lower, median, upper]).all():
                 raise ValueError(f"Non-finite forecast at {current['date_us']}")
 
-            signal = int(np.sign(median))
             actual = float(current[TARGET]) if pd.notna(current[TARGET]) else np.nan
-            open_price = current.get("open_0930", np.nan)
-            filled = signal != 0 and pd.notna(open_price)
             records.append({
                 "date_us": current["date_us"],
-                "forecast_cutoff_utc": current["forecast_cutoff_utc"],
                 "train_n": len(history),
                 "train_through": history["date_us"].iloc[-1],
                 **{name: current[name] for name in COVARIATES},
                 "forecast_q10": lower,
                 "forecast_log_return": median,
+                "forecast_return": median,
                 "forecast_q90": upper,
                 "actual_log_return": actual,
-                "signal": signal,
-                "entry_ts_utc": current.get("open_0930_ts_utc", pd.NaT) if filled else pd.NaT,
-                "entry_price": float(open_price) if filled else np.nan,
+                "actual_return": actual,
+                "signal": int(np.sign(median)),
             })
             progress.set_postfix(status, phase="complete", q50=f"{median:+.6f}", refresh=False)
             progress.update()

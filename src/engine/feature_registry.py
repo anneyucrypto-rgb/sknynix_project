@@ -21,7 +21,7 @@ FEATURES: dict[str, FeatureSpec] = {
     "us_5min": FeatureSpec("us_5min", None, "completed SKHY five-minute interval", ("raw_skhy_5min", "raw_skhy_quotes", "raw_fx_1min", "raw_kr_daily"), "build_us_5min"),
     "h1": FeatureSpec("h1", None, "daily ARDL--UECM observation", ("daily",), "build_h1"),
     "h2": FeatureSpec("h2", None, "date by fixed thirty-minute response window", ("daily", "raw_skhy_1min", "raw_soxx_1min", "raw_fx_1min", "raw_kr_daily"), "build_h2"),
-    "h3": FeatureSpec("h3", None, "directional target observation", ("h2", "daily"), "build_h3"),
+    "h3": FeatureSpec("h3", None, "U.S. close to next Korean session", ("daily",), "build_h3", version="v7"),
 }
 
 

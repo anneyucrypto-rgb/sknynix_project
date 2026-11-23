@@ -313,7 +313,7 @@ CONTRACTS: dict[str, DatasetContract] = {
     ),
     "h3": DatasetContract(
         "h3",
-        "one directional target observation",
+        "one U.S.-close to next-Korean-session observation",
         ("direction", "source_session_date", "target_session_date", "anchor_type", "horizon_min"),
         (
             "direction", "source_session_date", "target_session_date",

@@ -6,6 +6,7 @@ from src.hypotheses.h1 import (
     equilibrium_error,
     estimate_h1,
     narayan_case_iii_bounds,
+    rolling_equilibrium_series,
     rolling_stability,
 )
 
@@ -53,10 +54,13 @@ def test_narayan_bounds_are_only_used_for_supported_finite_samples():
 
 
 def test_rolling_stability_reports_required_diagnostics():
-    rolling = rolling_stability(
-        _cointegrated_frame(70), window=40, step=15, max_p=1, max_q=1
-    )
+    frame = _cointegrated_frame(70)
+    rolling = rolling_stability(frame, window=40, step=15, max_p=1, max_q=1)
     assert not rolling.empty
     assert {"theta", "intercept", "residual_persistence"}.issubset(rolling)
     assert rolling["window_end"].is_monotonic_increasing
+    plotted = rolling_equilibrium_series(frame, rolling)
+    np.testing.assert_allclose(
+        plotted["ect"], plotted["a_d"] - plotted["equilibrium"]
+    )
 

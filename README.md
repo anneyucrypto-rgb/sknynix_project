@@ -11,8 +11,8 @@ Korean ordinary shares (000660).
 | `daily` | Paired U.S./Korean trading date | H1, H2, H3 |
 | `us_5min` | Completed SKHY five-minute bar | reusable market-quality features |
 | `h1` | Eligible daily observation | daily ARDL--UECM equilibrium |
-| `h2` | Eligible daily observation | ablation-selected controlled regression |
-| `h3` | Directional target observation | directional ECM |
+| `h2` | Five-minute SKHY observation | intraday convergence toward H1 equilibrium |
+| `h3` | U.S. close paired to next Korean session | next-session Korean convergence regression |
 
 All timestamps are stored in UTC. Session dates retain their market meaning,
 and as-of joins only use observations available at the modeled information
@@ -57,7 +57,9 @@ workflow. Every other Python module is described below.
 | [`src/features/chronos_2.py`](src/features/chronos_2.py) | Selects the Chronos-2 target and four daily covariates from the H1/H2 panel and writes the dedicated Chronos experiment input. |
 | [`src/features/utils.py`](src/features/utils.py) | Provides shared Parquet readers, timestamp normalization, validation, atomic feature writes, and legacy execution-feature calculations. |
 | [`src/hypotheses/h1.py`](src/hypotheses/h1.py) | Estimates the daily ARDL--UECM, performs bounds and bootstrap inference, constructs the ECT, and evaluates rolling stability. |
-| [`src/hypotheses/overnight_ablation.py`](src/hypotheses/overnight_ablation.py) | Imports H1, reconstructs the ECT, evaluates H2 control ablations, applies validity filters, performs nested p/q and control selection, and writes model/audit artifacts. |
+| [`src/hypotheses/h2.py`](src/hypotheses/h2.py) | Measures five-minute convergence toward static and dynamic H1 equilibrium references from 09:30 ET using fixed and liquidity-qualified clocks, ECMs, threshold ECMs, and censored event-time inference. |
+| [`src/hypotheses/h3.py`](src/hypotheses/h3.py) | Tests whether the next Korean session responds to the equilibrium error remaining at the U.S. close, using causal H1 parameters and HAC inference. |
+| [`src/hypotheses/overnight_ablation.py`](src/hypotheses/overnight_ablation.py) | Runs the separate legacy daily overnight-return control-ablation forecast and writes model/audit artifacts. |
 | [`backtest/backtest.py`](backtest/backtest.py) | Reproduces the retained H1/H2 expanding-window forecasts from a materialized ablation run. |
 | [`backtest/chronos_2.py`](backtest/chronos_2.py) | Runs causal expanding-window Chronos-2 LoRA fine-tuning and one-step quantile forecasts. |
 | [`backtest/forecast_comparison.py`](backtest/forecast_comparison.py) | Builds the fixed VIX-only H1/H2 benchmark and compares it with Chronos-2 on identical forecast dates. |
@@ -87,13 +89,17 @@ workflow. Every other Python module is described below.
 | [`src/engine/sql_builder.py`](src/engine/sql_builder.py) | Loads, validates, renders, and hashes strict SQL templates. |
 | [`src/engine/experiment.py`](src/engine/experiment.py) | Defines validated, serializable, and hashable experiment specifications. |
 | [`src/engine/model_registry.py`](src/engine/model_registry.py) | Stores experiment metadata, coefficients, and diagnostics in DuckDB. |
-| [`app.py`](app.py) | Reserved application entry point; it currently contains no runtime workflow. |
+| [`app.py`](app.py) | Streamlit landing page linking to the cross-border price-discovery findings. |
+| [`pages/2_Findings.py`](pages/2_Findings.py) | Scrollable H1--H3 findings dashboard with price dynamics, response charts, diagnostics, conclusions, and Markdown reports. |
+| [`src/dashboard/findings.py`](src/dashboard/findings.py) | Loads canonical research runs, derives conclusion states, and computes the shared diagnostic battery. |
 
 ### Automated tests
 
 | Test module | Coverage |
 | --- | --- |
 | [`tests/test_overnight_ablation.py`](tests/test_overnight_ablation.py) | H1/H2 estimation, eligibility filters, nested selection, and proxy-redundancy analysis. |
+| [`tests/test_h2.py`](tests/test_h2.py) | Intraday ECM stability, two-bar liquidity anchors, convergence events, censoring, and Kaplan--Meier inference. |
+| [`tests/test_h3.py`](tests/test_h3.py) | Strict next-Korean-session pairing, holiday deduplication, and recovery of positive Korean error correction. |
 | [`tests/test_forecast_comparison.py`](tests/test_forecast_comparison.py) | Chronos variable contract and common-date model comparison. |
 | [`tests/test_overnight_strategy.py`](tests/test_overnight_strategy.py) | Calibration, execution rules, costs, stops, and portfolio safeguards. |
 | [`tests/test_price_parity.py`](tests/test_price_parity.py) | FX-adjusted parity and price-feature calculations. |
@@ -106,8 +112,18 @@ H1 estimates the long-run level relation between the prior SKHY close and the
 latest FX-adjusted Korean ordinary-share close using a daily ARDL--UECM. It
 derives the equilibrium slope from `-rho_k/rho_a`, tests the level terms with
 ARDL bounds and bootstrap inference, and reports rolling stability. The full
-specification is in [`design/h1.md`](design/h1.md). H2 includes its pre-response
-equilibrium error. At every forecast origin, H1 and the ECT are re-estimated
+specification is in [`design/h1.md`](design/h1.md). The canonical H2 study then
+measures five-minute convergence from 09:30 using fixed and liquidity-qualified
+clocks; its full specification and current results are in
+[`design/h2.md`](design/h2.md).
+
+H3 tests the reverse completion step: whether the first Korean session after
+the U.S. close responds to the remaining ADR-minus-Korean equilibrium error.
+Its model, calendar safeguards, and current estimates are documented in
+[`design/h3.md`](design/h3.md).
+
+The older overnight-return ablation includes its own pre-response equilibrium
+error. At every forecast origin, H1 and the ECT are re-estimated
 from prior rows, BIC selects p/q within each control specification, and models
 must have \(-2<\lambda<0\), significant lambda, and positive significant Korean
 return transmission. Candidate groups are SOXX, normalized SKHY sentiment, Korean

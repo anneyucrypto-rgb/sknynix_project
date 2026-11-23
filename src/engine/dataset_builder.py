@@ -453,15 +453,6 @@ class DatasetBuilder:
     def build_h3(self, h1_model_id: str = "theory_parity", h1_intercept: float | None = None, h1_theta: float | None = None, controls: Iterable[str] = ("us_soxx_return", "kr_sector_return")) -> pd.DataFrame:
         if h1_model_id != "theory_parity" and (h1_intercept is None or h1_theta is None):
             raise ValueError("estimated H1 ECTs require h1_intercept and h1_theta")
-        h2 = self._require("h2")
-        korea_to_us = pd.DataFrame({
-            "direction": "korea_to_us", "source_session_date": h2["date_us"], "target_session_date": h2["date_us"],
-            "information_cutoff_utc": h2["anchor_ts_utc"], "anchor_type": h2["anchor_type"], "horizon_min": h2["horizon_min"],
-            "ect_pre_response": h2["ect_anchor"], "source_market_return": h2["kr_return_known"], "target_market_return": h2["adr_return_h"],
-            "valid_outcome": h2["valid_outcome"], "h1_model_id": h1_model_id,
-        })
-        for control in validate_controls(tuple(controls)):
-            korea_to_us[control] = h2[control]
         daily = self._attach_controls(self._require("daily"), controls).sort_values("date_us")
         daily = daily.copy()
         daily["us_close_ts_utc"] = _utc_ns(daily["us_close_ts_utc"])
@@ -495,9 +486,12 @@ class DatasetBuilder:
             "ect_pre_response": paired["ect_pre_response"], "source_market_return": paired["adr_daily_return"], "target_market_return": paired["target_market_return"],
             "valid_outcome": paired["target_market_return"].notna() & paired["ect_pre_response"].notna(), "h1_model_id": h1_model_id,
         }).dropna(subset=["source_session_date", "target_session_date", "information_cutoff_utc"])
+        us_to_korea = us_to_korea.sort_values("source_session_date").drop_duplicates(
+            "target_session_date", keep="last"
+        )
         for control in validate_controls(tuple(controls)):
             us_to_korea[control] = paired[control]
-        return pd.concat([korea_to_us, us_to_korea], ignore_index=True)
+        return us_to_korea.reset_index(drop=True)
 
     def _require(self, name: str) -> pd.DataFrame:
         if name not in self.frames:

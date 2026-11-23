@@ -4,7 +4,8 @@ from src.engine.experiment import ExperimentSpec
 
 def test_h3_dependency_order():
     order = resolve_dependencies("h3")
-    assert order.index("daily") < order.index("h2") < order.index("h3")
+    assert order.index("daily") < order.index("h3")
+    assert "h2" not in order
     assert "anchors" not in order
 
 

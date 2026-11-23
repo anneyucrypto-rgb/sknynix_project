@@ -225,6 +225,45 @@ def estimate_h1(
     return H1Estimate(summary, fit, sample, prepared, spec)
 
 
+def expanding_h1_parameters(
+    dates: Iterable[object],
+    daily: pd.DataFrame,
+    *,
+    min_train: int = 40,
+    max_p: int = 3,
+    max_q: int = 3,
+    include_current_date: bool = False,
+) -> pd.DataFrame:
+    """Estimate causal H1 parameters for each requested information date.
+
+    Intraday H2 excludes the current date. H3 may include it because the daily
+    row dated ``d`` contains prices already known by the U.S. close on ``d``.
+    """
+    daily_dates = pd.to_datetime(daily["date_us"])
+    rows: list[dict[str, object]] = []
+    for date in sorted(pd.to_datetime(pd.Series(list(dates))).dt.date.unique()):
+        cutoff = pd.Timestamp(date)
+        mask = daily_dates.le(cutoff) if include_current_date else daily_dates.lt(cutoff)
+        history = daily.loc[mask].sort_values("date_us")
+        if len(history) < min_train:
+            continue
+        try:
+            estimate = estimate_h1(history, max_p=max_p, max_q=max_q)
+        except ValueError:
+            continue
+        rows.append({
+            "date_us": date,
+            "h1_intercept": float(estimate.summary["intercept"]),
+            "h1_theta": float(estimate.summary["theta"]),
+            "h1_training_n": int(estimate.summary["nobs"]),
+            "h1_training_through": history["date_us"].iloc[-1],
+        })
+    return pd.DataFrame(rows, columns=[
+        "date_us", "h1_intercept", "h1_theta", "h1_training_n",
+        "h1_training_through",
+    ])
+
+
 def fit_h1_equilibrium(
     frame: pd.DataFrame,
     controls: Iterable[str] = (),
@@ -432,6 +471,105 @@ def rolling_stability(
     return pd.DataFrame(rows)
 
 
+def rolling_equilibrium_series(
+    frame: pd.DataFrame,
+    rolling: pd.DataFrame,
+) -> pd.DataFrame:
+    """Combine rolling H1 parameters with the observed levels and ECT."""
+    if rolling.empty:
+        raise ValueError("Cannot plot rolling H1 results because no windows were estimated")
+    required = {"window_start", "window_end", "intercept", "theta"}
+    if missing := required.difference(rolling.columns):
+        raise ValueError(f"Rolling H1 results are missing columns: {sorted(missing)}")
+
+    levels = _levels(frame)[["date_us", A_LEVEL, K_LEVEL]].copy()
+    levels["date_us"] = pd.to_datetime(levels["date_us"])
+    series = rolling.copy()
+    series["date_us"] = pd.to_datetime(series["window_end"])
+    series = series.merge(levels, on="date_us", how="left", validate="one_to_one")
+    if series[[A_LEVEL, K_LEVEL]].isna().any().any():
+        raise ValueError("Rolling H1 window endpoints do not match the daily level panel")
+    series["equilibrium"] = (
+        pd.to_numeric(series["intercept"], errors="coerce")
+        + pd.to_numeric(series["theta"], errors="coerce") * series[K_LEVEL]
+    )
+    series["ect"] = series[A_LEVEL] - series["equilibrium"]
+    return series.sort_values("date_us").reset_index(drop=True)
+
+
+def plot_rolling_equilibrium(
+    frame: pd.DataFrame,
+    rolling: pd.DataFrame,
+    output: Path,
+) -> Path:
+    """Plot the observed level, rolling equilibrium, and rolling ECT over time."""
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+
+    series = rolling_equilibrium_series(frame, rolling)
+    dates = pd.to_datetime(series["date_us"])
+    actual = series[A_LEVEL].to_numpy(dtype=float)
+    equilibrium = series["equilibrium"].to_numpy(dtype=float)
+    ect = series["ect"].to_numpy(dtype=float)
+
+    figure, (level_axis, ect_axis) = plt.subplots(
+        2,
+        1,
+        figsize=(11, 7.5),
+        sharex=True,
+        gridspec_kw={"height_ratios": (1.35, 1.0), "hspace": 0.12},
+    )
+    level_axis.plot(dates, actual, color="#1f77b4", linewidth=2.0, label=r"Actual $a_d$")
+    level_axis.plot(
+        dates,
+        equilibrium,
+        color="#ff7f0e",
+        linewidth=2.0,
+        label=r"Rolling equilibrium $\hat{a}_d^*$",
+    )
+    level_axis.fill_between(
+        dates, actual, equilibrium, color="#7f7f7f", alpha=0.12, label=r"$ECT_d$ gap"
+    )
+    level_axis.set_ylabel("Log USD price level")
+    level_axis.set_title("SKHY level, rolling long-run equilibrium, and equilibrium error")
+    level_axis.legend(frameon=False, ncol=3, loc="best")
+    level_axis.grid(axis="y", alpha=0.25)
+
+    ect_axis.axhline(0.0, color="#333333", linewidth=1.0, label="Equilibrium")
+    ect_axis.plot(dates, ect, color="#2ca02c", linewidth=1.8, marker="o", markersize=3)
+    ect_axis.fill_between(
+        dates, 0.0, ect, where=ect >= 0.0, color="#d62728", alpha=0.18,
+        interpolate=True, label="SKHY above equilibrium",
+    )
+    ect_axis.fill_between(
+        dates, 0.0, ect, where=ect < 0.0, color="#1f77b4", alpha=0.18,
+        interpolate=True, label="SKHY below equilibrium",
+    )
+    ect_axis.set_ylabel(r"Rolling $ECT_d$")
+    ect_axis.set_xlabel("Daily date")
+    ect_axis.grid(axis="y", alpha=0.25)
+    ect_axis.legend(frameon=False, ncol=3, loc="best")
+    ect_axis.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=5, maxticks=9))
+    ect_axis.xaxis.set_major_formatter(mdates.ConciseDateFormatter(ect_axis.xaxis.get_major_locator()))
+
+    figure.text(
+        0.01,
+        0.01,
+        "Each point uses the ARDL parameters estimated in the rolling window ending on that date.",
+        fontsize=9,
+        color="#555555",
+    )
+    figure.align_ylabels((level_axis, ect_axis))
+    output = output.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output, dpi=180, bbox_inches="tight")
+    plt.close(figure)
+    return output
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, default=H2_FEATURE_PATH)
@@ -443,6 +581,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rolling-step", type=int, default=1)
     parser.add_argument("--bootstrap-replications", type=int, default=499)
     parser.add_argument("--seed", type=int, default=20261123)
+    parser.add_argument(
+        "--plot-output",
+        type=Path,
+        default=PROJECT_ROOT / "reports" / "h1_rolling_equilibrium.png",
+    )
     return parser.parse_args()
 
 
@@ -470,11 +613,13 @@ def main() -> int:
     pd.DataFrame([estimate.summary]).to_parquet(output_dir / "h1_model.parquet", index=False)
     pd.DataFrame([inference]).to_parquet(output_dir / "h1_bounds.parquet", index=False)
     rolling.to_parquet(output_dir / "h1_rolling_stability.parquet", index=False)
+    plot_path = plot_rolling_equilibrium(frame, rolling, args.plot_output)
     ect = _levels(frame)[["date_us", A_LEVEL, K_LEVEL]].copy()
     ect["ect"] = equilibrium_error(frame, estimate.summary)
     ect.to_parquet(output_dir / "h1_ect.parquet", index=False)
     print(pd.Series({**estimate.summary, **inference}).to_string(), flush=True)
     print(f"[H1] Wrote ARDL artifacts to {output_dir}", flush=True)
+    print(f"[H1] Wrote rolling-equilibrium plot to {plot_path}", flush=True)
     return 0
 
 

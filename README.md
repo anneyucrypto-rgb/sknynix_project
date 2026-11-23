@@ -76,20 +76,12 @@ workflow. Every other Python module is described below.
 | [`src/ingestion/fx_data.py`](src/ingestion/fx_data.py) | Incrementally downloads USD/KRW one- and five-minute bars. |
 | [`src/ingestion/economic_data.py`](src/ingestion/economic_data.py) | Downloads U.S. Treasury, inflation, and funding data plus explicitly labelled Korean market proxies. |
 
-### Reproducibility engine and application entry point
+### Application entry point
 
 | Module | Function |
 | --- | --- |
-| [`src/engine/dataset_builder.py`](src/engine/dataset_builder.py) | Orchestrates point-in-time dataset builds, dependency resolution, cache keys, validation, and artifact publication. |
-| [`src/engine/feature_registry.py`](src/engine/feature_registry.py) | Declares canonical dataset grains, dependencies, builders, postprocessors, and feature versions. |
-| [`src/engine/control_registry.py`](src/engine/control_registry.py) | Declares stable control metadata, joining rules, coverage requirements, and proxy labels. |
-| [`src/engine/dependency_resolver.py`](src/engine/dependency_resolver.py) | Topologically orders feature dependencies and identifies downstream invalidation. |
-| [`src/engine/cache_manager.py`](src/engine/cache_manager.py) | Hashes source snapshots and maintains content-addressed feature-cache metadata. |
-| [`src/engine/duckdb_engine.py`](src/engine/duckdb_engine.py) | Wraps DuckDB connections, transactions, identifier validation, and query helpers. |
-| [`src/engine/sql_builder.py`](src/engine/sql_builder.py) | Loads, validates, renders, and hashes strict SQL templates. |
-| [`src/engine/experiment.py`](src/engine/experiment.py) | Defines validated, serializable, and hashable experiment specifications. |
-| [`src/engine/model_registry.py`](src/engine/model_registry.py) | Stores experiment metadata, coefficients, and diagnostics in DuckDB. |
-| [`app.py`](app.py) | Streamlit landing page linking to the cross-border price-discovery findings. |
+| [`streamlit_app.py`](streamlit_app.py) | Canonical Streamlit landing page linking to the cross-border price-discovery findings. |
+| [`app.py`](app.py) | Backward-compatible launcher for the canonical Streamlit application. |
 | [`pages/2_Findings.py`](pages/2_Findings.py) | Scrollable H1--H3 findings dashboard with price dynamics, response charts, diagnostics, conclusions, and Markdown reports. |
 | [`src/dashboard/findings.py`](src/dashboard/findings.py) | Loads canonical research runs, derives conclusion states, and computes the shared diagnostic battery. |
 
@@ -105,8 +97,6 @@ workflow. Every other Python module is described below.
 | [`tests/test_price_parity.py`](tests/test_price_parity.py) | FX-adjusted parity and price-feature calculations. |
 | [`tests/test_massive_news.py`](tests/test_massive_news.py) | News ingestion, sentiment normalization, and bucketing. |
 | [`tests/test_incremental_massive.py`](tests/test_incremental_massive.py) | Incremental source coverage, range detection, and snapshot merging. |
-| [`tests/test_engine_specs.py`](tests/test_engine_specs.py) | Experiment, registry, dependency, and builder contracts. |
-| [`tests/test_duckdb_quote_buckets.py`](tests/test_duckdb_quote_buckets.py) | DuckDB quote aggregation and time-bucket behavior. |
 
 H1 estimates the long-run level relation between the prior SKHY close and the
 latest FX-adjusted Korean ordinary-share close using a daily ARDL--UECM. It

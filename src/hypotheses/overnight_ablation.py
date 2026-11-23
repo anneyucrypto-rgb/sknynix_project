@@ -16,7 +16,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import statsmodels.api as sm
+from statsmodels.regression.linear_model import OLS
+from statsmodels.tools.tools import add_constant
 
 from src.config import PathSettings, feature_output_path
 from src.features.h1_h2 import (
@@ -82,7 +83,7 @@ def _columns(spec: OvernightSpec, p_order: int = 0, q_order: int = 0) -> tuple[s
 def _design(
     frame: pd.DataFrame, spec: OvernightSpec, p_order: int = 0, q_order: int = 0,
 ) -> pd.DataFrame:
-    return sm.add_constant(
+    return add_constant(
         frame[list(_columns(spec, p_order, q_order))].astype(float),
         has_constant="add",
     )
@@ -114,7 +115,7 @@ def fit_daily(
     sample = _sample(frame, spec, p_order, q_order)
     if len(sample) <= len(_columns(spec, p_order, q_order)) + 2:
         raise ValueError("Insufficient complete daily observations")
-    return sm.OLS(sample[TARGET], _design(sample, spec, p_order, q_order)).fit(
+    return OLS(sample[TARGET], _design(sample, spec, p_order, q_order)).fit(
         cov_type="HAC", cov_kwds={"maxlags": hac_lags}
     )
 
@@ -142,7 +143,7 @@ def walk_forward(
         h1, _ = fit_h1_equilibrium(train)
         train["ect"] = _equilibrium_error(train, h1)
         test["ect"] = _equilibrium_error(test, h1)
-        fit = sm.OLS(
+        fit = OLS(
             train[TARGET], _design(train, spec, p_order, q_order)
         ).fit()
         forecast = float(
@@ -214,7 +215,7 @@ def build_full_sample_comparison(
         order_candidates: list[tuple[float, int, int]] = []
         for p_order in range(max_p + 1):
             for q_order in range(max_q + 1):
-                ols = sm.OLS(
+                ols = OLS(
                     common[TARGET], _design(common, spec, p_order, q_order)
                 ).fit()
                 order_candidates.append((float(ols.bic), p_order, q_order))
@@ -329,9 +330,9 @@ def analyze_kr_proxy_redundancy(
         diagnostic[f"correlation__{left}__{right}"] = float(correlations.loc[left, right])
     for variable in variables:
         others = [name for name in variables if name != variable]
-        auxiliary = sm.OLS(
+        auxiliary = OLS(
             common[variable].astype(float),
-            sm.add_constant(common[others].astype(float), has_constant="add"),
+            add_constant(common[others].astype(float), has_constant="add"),
         ).fit()
         diagnostic[f"vif__{variable}"] = (
             float(1.0 / (1.0 - auxiliary.rsquared))
@@ -394,7 +395,7 @@ def nested_walk_forward_selection(
                     columns = _columns(spec, p_order, q_order)
                     if len(train) <= len(columns) + 2:
                         continue
-                    ols = sm.OLS(
+                    ols = OLS(
                         train[TARGET], _design(train, spec, p_order, q_order)
                     ).fit()
                     if np.isfinite(ols.bic):
@@ -402,7 +403,7 @@ def nested_walk_forward_selection(
             if not orders:
                 continue
             bic, p_order, q_order = min(orders)
-            fit = sm.OLS(
+            fit = OLS(
                 train[TARGET], _design(train, spec, p_order, q_order)
             ).fit(cov_type="HAC", cov_kwds={"maxlags": 3})
             forecast = float(

@@ -1,10 +1,8 @@
-"""Reusable research feature definitions and validation."""
+"""Reusable research feature calculations."""
 
-from src.features.utils import CONTRACTS, DatasetContract, add_parity_columns, theoretical_adr_usd
+from src.features.utils import add_parity_columns, theoretical_adr_usd
 
 __all__ = [
-    "CONTRACTS",
-    "DatasetContract",
     "add_parity_columns",
     "theoretical_adr_usd",
 ]

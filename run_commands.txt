@@ -38,7 +38,7 @@ python -m pytest -q
 
 # Open the Streamlit research dashboard. Use the home-page link to reach the
 # combined H1--H3 Findings page.
-streamlit run app.py
+streamlit run streamlit_app.py
 
 # Optional Chronos-2 forecast workflow. Build its standalone daily input after
 # populating SKHY, Korean shares, VIX, FLKR, and USD/KRW source data.

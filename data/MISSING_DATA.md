@@ -2,8 +2,8 @@
 
 Inventory date: 2026-11-19
 
-Previously missing downloadable controls have now been populated. The engine
-and the retained overnight feature dataset is implemented and materialized.
+Previously missing downloadable controls have now been populated. The retained
+overnight feature dataset is implemented and materialized.
 Remaining gaps are raw-data coverage, limited sample size, point-in-time
 release metadata, unavailable direct Korean macro data, and the unbuilt
 standardized core layer.

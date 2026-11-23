@@ -42,10 +42,6 @@ class PathSettings:
     def feature_run(self, run_id: str) -> Path:
         return self.features / "experiments" / f"run_id={run_id}"
 
-    @property
-    def duckdb(self) -> Path:
-        return self.data / "research.duckdb"
-
     def raw_part(self, *parts: str) -> Path:
         return self.raw.joinpath(*parts, "part-00000.parquet")
 

@@ -1,6 +1,6 @@
 # Research data
 
-This directory contains the Parquet and DuckDB inputs for the SKHY–SK hynix
+This directory contains the Parquet inputs for the SKHY–SK hynix
 cointegration, error-correction, and directional price-discovery study.
 
 ## Storage convention
@@ -22,7 +22,6 @@ hashes so a later refresh cannot silently change an experiment.
 | `core/` | Standardized types, timestamps, identifiers, and schemas |
 | `features/` | Reusable daily, intraday, parity, liquidity, and anchor features |
 | `features/experiments/run_id=.../` | Versioned model-ready datasets |
-| `research.duckdb` | DuckDB catalog and SQL query engine |
 
 The retained overnight run materializes these linked artifacts:
 

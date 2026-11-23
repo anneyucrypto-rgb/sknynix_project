@@ -11,7 +11,13 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from src.dashboard.findings import RUNS, load_run, model_conclusions, shared_diagnostics
+from src.dashboard.findings import (
+    RUNS,
+    h2_uses_thirty_minute_artifacts,
+    load_run,
+    model_conclusions,
+    shared_diagnostics,
+)
 
 
 st.set_page_config(page_title="Findings · SKHY Price Discovery", page_icon="↔", layout="wide")
@@ -194,7 +200,8 @@ if isinstance(data["h3_panel"], pd.DataFrame) and not data["h3_panel"].empty:
 st.header("H2 — Error correction and time to convergence")
 st.markdown('<div class="section-note">The 30-minute ECM begins at 09:30 ET. Values below one in the response chart imply a shrinking gap; confidence bands incorporate uncertainty in the estimated adjustment coefficient.</div>', unsafe_allow_html=True)
 h2_models = data["h2_models"]
-if isinstance(h2_models, pd.DataFrame) and not h2_models.empty:
+h2_ready = h2_uses_thirty_minute_artifacts(data)
+if h2_ready:
     preferred = h2_models.loc[h2_models["reference"].eq("dynamic") & h2_models["anchor"].eq("liquid")].iloc[0]
     convergence = data["h2_convergence"]
     event = convergence.loc[convergence["reference"].eq("dynamic") & convergence["anchor"].eq("liquid") & convergence["duration"].eq("duration_clock_minutes")]
@@ -207,7 +214,11 @@ if isinstance(h2_models, pd.DataFrame) and not h2_models.empty:
     st.pyplot(_h2_response_figure(h2_models), clear_figure=True, width="stretch")
     st.caption("Implied response paths are model-based, not realized intraday averages. The dynamic-reference coefficient is negative and significant, but its half-life extends well beyond one U.S. regular session.")
 else:
-    st.info("H2 has not been estimated for this run.")
+    st.warning(
+        "Current 30-minute H2 artifacts are unavailable. Legacy five-minute "
+        "files are not relabelled as 30-minute estimates. Run "
+        "`python -m src.hypotheses.h2` and redeploy the generated H2 artifacts."
+    )
 
 st.header("H3 — Directional price discovery")
 st.markdown('<div class="section-note">H2 measures Korean-reference-to-SKHY adjustment during the U.S. session. H3 measures the reverse completion step: whether the next Korean session responds to the gap left at the U.S. close.</div>', unsafe_allow_html=True)
@@ -219,8 +230,11 @@ if isinstance(h3_model, pd.DataFrame) and not h3_model.empty:
     metrics[1].metric("One-sided p-value", f"{float(h3['lambda_k_p_value_positive']):.4f}")
     metrics[2].metric("Target sessions", f"{int(h3['target_sessions'])}")
     metrics[3].metric("Adjusted R²", f"{float(h3['adjusted_r_squared']):.3f}")
-    st.pyplot(_direction_figure(h2_models, h3_model), clear_figure=True, width="stretch")
-    st.caption("The two coefficients have different horizons and sign conventions: H2 30-minute convergence requires λ < 0; H3 Korean adjustment requires λK > 0.")
+    if h2_ready:
+        st.pyplot(_direction_figure(h2_models, h3_model), clear_figure=True, width="stretch")
+        st.caption("The two coefficients have different horizons and sign conventions: H2 30-minute convergence requires λ < 0; H3 Korean adjustment requires λK > 0.")
+    else:
+        st.info("The cross-direction coefficient chart will appear after H2 is rebuilt.")
 else:
     st.info("H3 has not been estimated for this run.")
 
@@ -237,10 +251,16 @@ else:
     st.caption("CUSUM uses a Brownian-bridge approximation. CUSUMSQ is shown as a descriptive maximum cumulative-square deviation; no approximate p-value is imposed.")
 
 st.header("Integrated conclusion and Markdown reports")
-st.markdown(
-    """<div class="conclusion"><b>Integrated finding.</b> H1 identifies a statistically supported daily cross-market equilibrium. H2 detects significant but slow 30-minute correction toward the dynamic equilibrium: the estimated half-life is about 1,056 minutes, and only 9.7% of eligible sessions enter the band before the U.S. close. H3 also finds a positive next-Korean-session response: a 1% larger U.S.-close discrepancy is associated with an approximately 0.502% higher Korean return. Together, the evidence indicates that adjustment begins during U.S. trading but is rarely completed there, with the following Korean session providing an additional convergence channel.</div>""",
-    unsafe_allow_html=True,
-)
+if h2_ready:
+    st.markdown(
+        """<div class="conclusion"><b>Integrated finding.</b> H1 identifies a statistically supported daily cross-market equilibrium. H2 detects significant but slow 30-minute correction toward the dynamic equilibrium: the estimated half-life is about 1,056 minutes, and only 9.7% of eligible sessions enter the band before the U.S. close. H3 also finds a positive next-Korean-session response: a 1% larger U.S.-close discrepancy is associated with an approximately 0.502% higher Korean return. Together, the evidence indicates that adjustment begins during U.S. trading but is rarely completed there, with the following Korean session providing an additional convergence channel.</div>""",
+        unsafe_allow_html=True,
+    )
+else:
+    st.warning(
+        "The integrated conclusion is withheld because this deployment does "
+        "not contain the current 30-minute H2 artifacts."
+    )
 
 tabs = st.tabs(["H1 report", "H2 report", "H3 report"])
 for tab, key in zip(tabs, ("h1_report", "h2_report", "h3_report"), strict=True):

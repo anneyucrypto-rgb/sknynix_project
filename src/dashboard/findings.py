@@ -39,6 +39,7 @@ def load_run(label: str) -> dict[str, pd.DataFrame | Path]:
         "h1_ect": _read(paths["h1"] / "h1_ect.parquet"),
         "h1_rolling": _read(paths["h1"] / "h1_rolling_stability.parquet"),
         "h2_models": _read(paths["h2"] / "h2_ecm_models.parquet"),
+        "h2_config": _read(paths["h2"] / "h2_config.parquet"),
         "h2_convergence": _read(paths["h2"] / "h2_convergence_summary.parquet"),
         "h2_panel": _read(paths["h2"] / "h2_intraday_panel.parquet"),
         "h3_model": _read(paths["h3"] / "h3_model.parquet"),
@@ -48,6 +49,22 @@ def load_run(label: str) -> dict[str, pd.DataFrame | Path]:
         "h2_report": PROJECT_ROOT / "design/h2.md",
         "h3_report": PROJECT_ROOT / "design/h3.md",
     }
+
+
+def h2_uses_thirty_minute_artifacts(
+    data: dict[str, pd.DataFrame | Path],
+) -> bool:
+    """Return whether the selected run has the current H2 artifact schema."""
+    models = data.get("h2_models")
+    config = data.get("h2_config")
+    if not isinstance(models, pd.DataFrame) or models.empty:
+        return False
+    if "lambda_30" not in models or "lambda_30_p_value" not in models:
+        return False
+    if isinstance(config, pd.DataFrame) and not config.empty:
+        interval = pd.to_numeric(config.iloc[0].get("interval_minutes"), errors="coerce")
+        return bool(pd.notna(interval) and int(interval) == 30)
+    return True
 
 
 def model_conclusions(data: dict[str, pd.DataFrame | Path]) -> dict[str, dict[str, str]]:
@@ -69,7 +86,7 @@ def model_conclusions(data: dict[str, pd.DataFrame | Path]) -> dict[str, dict[st
             "status": "Cointegrated" if decision == "cointegrated" else "Inconclusive",
             "detail": f"Long-run slope θ = {theta:.3f}; bootstrap decision: {decision or 'unavailable'}.",
         }
-    if isinstance(h2, pd.DataFrame) and not h2.empty:
+    if h2_uses_thirty_minute_artifacts(data):
         preferred = h2.loc[
             h2["reference"].eq("dynamic") & h2["anchor"].eq("liquid")
         ]
@@ -78,6 +95,11 @@ def model_conclusions(data: dict[str, pd.DataFrame | Path]) -> dict[str, dict[st
         output["h2"] = {
             "status": "Convergent" if stable else "No convergence detected",
             "detail": f"Thirty-minute λ = {float(row['lambda_30']):.4f}; p = {float(row['lambda_30_p_value']):.3f}.",
+        }
+    elif isinstance(h2, pd.DataFrame) and not h2.empty:
+        output["h2"] = {
+            "status": "Rebuild required",
+            "detail": "Legacy five-minute artifacts detected. Run the current H2 pipeline.",
         }
     if isinstance(h3, pd.DataFrame) and not h3.empty:
         row = h3.iloc[0]

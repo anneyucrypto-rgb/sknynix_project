@@ -18,10 +18,12 @@ from src.hypotheses.h2 import fit_intraday_ecm
 from src.hypotheses.h3 import fit_h3_model
 
 
+ARTIFACT_SCHEMA_VERSION = "h2-30min-v1"
+
 RUNS = {
     "Current canonical estimates": {
         "h1": PROJECT_ROOT / "data/features/experiments/run_id=h1-daily-ardl",
-        "h2": PROJECT_ROOT / "data/features/experiments/run_id=h2-intraday-convergence",
+        "h2": PROJECT_ROOT / "data/features/experiments/run_id=h2-30min-convergence",
         "h3": PROJECT_ROOT / "data/features/experiments/run_id=h3-next-korean-session",
     },
 }

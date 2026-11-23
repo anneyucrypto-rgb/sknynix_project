@@ -9,7 +9,6 @@ Korean ordinary shares (000660).
 | Dataset | Grain | Main consumer |
 | --- | --- | --- |
 | `daily` | Paired U.S./Korean trading date | H1, H2, H3 |
-| `us_5min` | Completed SKHY five-minute bar | reusable market-quality features |
 | `h1` | Eligible daily observation | daily ARDL--UECM equilibrium |
 | `h2` | Five-minute SKHY observation | intraday convergence toward H1 equilibrium |
 | `h3` | U.S. close paired to next Korean session | next-session Korean convergence regression |

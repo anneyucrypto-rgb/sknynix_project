@@ -1,6 +1,6 @@
 """Backward-compatible launcher for the canonical Streamlit application."""
 
-from streamlit_app import render_home
+from streamlit_app import run_app
 
 
-render_home()
+run_app()

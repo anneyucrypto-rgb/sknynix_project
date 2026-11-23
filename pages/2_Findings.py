@@ -12,6 +12,7 @@ import pandas as pd
 import streamlit as st
 
 from src.dashboard.findings import (
+    ARTIFACT_SCHEMA_VERSION,
     RUNS,
     h2_uses_thirty_minute_artifacts,
     load_run,
@@ -19,8 +20,6 @@ from src.dashboard.findings import (
     shared_diagnostics,
 )
 
-
-st.set_page_config(page_title="Findings · SKHY Price Discovery", page_icon="↔", layout="wide")
 
 COLORS = {
     "ink": "#153039", "rust": "#b55332", "blue": "#397a8b",
@@ -56,12 +55,14 @@ st.markdown(
 
 
 @st.cache_data(show_spinner=False)
-def _load(label: str):
+def _load(label: str, artifact_schema_version: str):
+    del artifact_schema_version
     return load_run(label)
 
 
 @st.cache_data(show_spinner="Running shared diagnostics…")
-def _diagnostics(label: str) -> pd.DataFrame:
+def _diagnostics(label: str, artifact_schema_version: str) -> pd.DataFrame:
+    del artifact_schema_version
     return shared_diagnostics(load_run(label))
 
 
@@ -169,7 +170,7 @@ st.markdown(
 )
 
 run_label = st.selectbox("Select research run · View model conclusions", list(RUNS), index=0)
-data = _load(run_label)
+data = _load(run_label, ARTIFACT_SCHEMA_VERSION)
 conclusions = model_conclusions(data)
 
 columns = st.columns(3)
@@ -240,7 +241,7 @@ else:
 
 st.header("Shared statistical diagnostics")
 st.markdown('<div class="section-note">A common battery checks serial correlation, heteroskedasticity, functional form, residual normality, conditional variance, and parameter stability. A p-value below 0.05 flags a possible violation rather than automatically invalidating the model.</div>', unsafe_allow_html=True)
-diagnostics = _diagnostics(run_label)
+diagnostics = _diagnostics(run_label, ARTIFACT_SCHEMA_VERSION)
 if diagnostics.empty:
     st.info("Diagnostics are not available for this run.")
 else:

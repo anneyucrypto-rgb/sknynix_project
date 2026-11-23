@@ -687,7 +687,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=PROJECT_ROOT / "data" / "features" / "experiments" / "run_id=h2-intraday-convergence",
+        default=PROJECT_ROOT / "data" / "features" / "experiments" / "run_id=h2-30min-convergence",
     )
     parser.add_argument("--min-h1-train", type=int, default=40)
     parser.add_argument("--min-dynamic-days", type=int, default=20)

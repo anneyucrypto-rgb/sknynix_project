@@ -1,9 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 96" role="img" aria-labelledby="title desc">
-  <title id="title">SKHN U.S.–Korea Price Discovery</title>
-  <desc id="desc">A cross-border arrow mark joining the U.S. and Korean markets.</desc>
+  <title id="title">Market Research Lab</title>
+  <desc id="desc">A connected-markets symbol for the research findings hub.</desc>
   <rect width="360" height="96" rx="14" fill="#123f49"/>
   <circle cx="49" cy="48" r="28" fill="#f5f3ee"/>
-  <path d="M30 42h31l-8-8m8 8-8 8M68 54H37l8 8m-8-8 8-8" fill="none" stroke="#b55332" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
-  <text x="90" y="43" fill="#f5f3ee" font-family="Georgia, serif" font-size="25" font-weight="700">SKHN</text>
-  <text x="90" y="69" fill="#d9d3c6" font-family="Arial, sans-serif" font-size="15" letter-spacing="2">US ↔ KOREA</text>
+  <circle cx="38" cy="39" r="5" fill="#b55332"/>
+  <circle cx="60" cy="35" r="5" fill="#c69945"/>
+  <circle cx="52" cy="60" r="5" fill="#397a8b"/>
+  <path d="M42 39l13-3M40 43l9 13M58 40l-5 15" fill="none" stroke="#123f49" stroke-width="3" stroke-linecap="round"/>
+  <text x="90" y="43" fill="#f5f3ee" font-family="Georgia, serif" font-size="25" font-weight="700">MARKET LAB</text>
+  <text x="90" y="69" fill="#d9d3c6" font-family="Arial, sans-serif" font-size="14" letter-spacing="2">RESEARCH FINDINGS</text>
 </svg>

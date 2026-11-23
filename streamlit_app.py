@@ -19,9 +19,9 @@ def render_home() -> None:
         @media(max-width:700px){.hero{padding-top:2rem}}
         </style>
         <div class="hero">
-          <div class="eyebrow">SK hynix · United States ↔ Korea</div>
-          <h1>Cross-border<br>price discovery.</h1>
-          <p>Follow the equilibrium relationship from daily cointegration of Assets</p>
+          <div class="eyebrow">Market Research · Data Analysis</div>
+          <h1>Connected markets.<br>Evidence in one place.</h1>
+          <p>Explore aggregated data-analysis results for SK hynix U.S.–Korea price discovery, Bitcoin versus interest rates, and Magnificent Seven cointegration.</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -31,7 +31,7 @@ def render_home() -> None:
 def run_app() -> None:
     """Configure navigation and run the selected Streamlit page."""
     st.set_page_config(
-        page_title="SKHN US - Korean Price Discovery",
+        page_title="Market Research Findings",
         page_icon="↔",
         layout="wide",
     )

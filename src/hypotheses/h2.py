@@ -1,6 +1,6 @@
-"""Intraday H2 convergence models beginning at 09:30 America/New_York.
+"""Thirty-minute H2 convergence models beginning at 09:30 America/New_York.
 
-H2 measures how a five-minute SKHY pricing deviation closes relative to both a
+H2 measures how a thirty-minute SKHY pricing deviation closes relative to both a
 static Korean-close/FX equilibrium and a prior-trained dynamic U.S.-information
 reference.  It supports a fixed 09:30 clock, a two-bar liquidity-qualified
 anchor, ECM speed estimates, threshold ECMs, and right-censored convergence
@@ -38,14 +38,14 @@ class H2Config:
     start_clock: str = "09:30"
     regular_open: str = "09:30"
     regular_close: str = "16:00"
-    interval_minutes: int = 5
+    interval_minutes: int = 30
     min_h1_train: int = 40
     max_h1_p: int = 3
     max_h1_q: int = 3
     min_dynamic_days: int = 20
     min_dynamic_observations: int = 200
-    min_dollar_volume: float = 25_000.0
-    min_quote_updates: int = 5
+    min_dollar_volume: float = 150_000.0
+    min_quote_updates: int = 30
     max_spread_bps: float = 75.0
     liquidity_confirmation_bars: int = 2
     convergence_band_bps: float = 25.0
@@ -54,8 +54,8 @@ class H2Config:
     fx_max_age_minutes: int = 15
 
     def validate(self) -> None:
-        if self.interval_minutes != 5:
-            raise ValueError("H2 currently requires five-minute intervals")
+        if self.interval_minutes != 30:
+            raise ValueError("H2 currently requires thirty-minute intervals")
         if self.min_h1_train < 20:
             raise ValueError("min_h1_train must be at least 20")
         if self.min_dynamic_days < 1 or self.min_dynamic_observations < 1:
@@ -77,9 +77,9 @@ DYNAMIC_CONTROLS = (
 )
 
 ECM_CONTROLS = (
-    "soxx_return_5min",
-    "qqq_return_5min",
-    "fx_return_5min",
+    "soxx_return_30min",
+    "qqq_return_30min",
+    "fx_return_30min",
     "news_flow",
     "log_dollar_volume",
     "spread_bps",
@@ -149,11 +149,27 @@ def _quote_buckets(raw: Path, config: H2Config) -> pd.DataFrame:
     return output
 
 
-def _five_minute_bars(raw: Path, ticker: str) -> pd.DataFrame:
+def _interval_bars(raw: Path, ticker: str, config: H2Config) -> pd.DataFrame:
+    """Aggregate source five-minute bars into completed H2 intervals."""
     frame = _parquet_tree(raw / "us" / "market" / f"{ticker}_5min").copy()
-    frame["bar_start_utc"] = _utc(frame["timestamp"])
-    columns = ["bar_start_utc", "open", "close", "volume", "vwap", "transactions"]
-    return frame[columns].rename(columns={
+    frame["source_start_utc"] = _utc(frame["timestamp"])
+    frame["bar_start_utc"] = frame["source_start_utc"].dt.floor(
+        f"{config.interval_minutes}min"
+    )
+    for column in ("open", "close", "volume", "vwap", "transactions"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame = frame.sort_values("source_start_utc")
+    frame["vwap_notional"] = frame["vwap"] * frame["volume"]
+    grouped = frame.groupby("bar_start_utc", as_index=False, sort=True)
+    output = grouped.agg(
+        open=("open", "first"),
+        close=("close", "last"),
+        volume=("volume", "sum"),
+        transactions=("transactions", "sum"),
+        vwap_notional=("vwap_notional", "sum"),
+    )
+    output["vwap"] = output["vwap_notional"] / output["volume"].replace(0.0, np.nan)
+    return output.drop(columns="vwap_notional").rename(columns={
         "open": f"{ticker.lower()}_open",
         "close": f"{ticker.lower()}_close",
         "volume": f"{ticker.lower()}_volume",
@@ -166,7 +182,7 @@ def _market_returns(panel: pd.DataFrame, ticker: str) -> pd.DataFrame:
     close = f"{ticker.lower()}_close"
     open_column = f"{ticker.lower()}_open"
     output = panel.copy()
-    output[f"{ticker.lower()}_return_5min"] = output.groupby("date_us")[close].transform(
+    output[f"{ticker.lower()}_return_30min"] = output.groupby("date_us")[close].transform(
         lambda values: np.log(values).diff()
     )
     first_bar = output.groupby("date_us")["bar_start_utc"].transform("min")
@@ -191,7 +207,7 @@ def _attach_fx(panel: pd.DataFrame, raw: Path, config: H2Config) -> pd.DataFrame
         direction="backward",
         tolerance=pd.Timedelta(minutes=config.fx_max_age_minutes),
     )
-    output["fx_return_5min"] = output.groupby("date_us")["usdkrw"].transform(
+    output["fx_return_30min"] = output.groupby("date_us")["usdkrw"].transform(
         lambda values: np.log(values).diff()
     )
     return output.sort_values(["date_us", "bar_start_utc"]).reset_index(drop=True)
@@ -217,10 +233,14 @@ def _attach_korean_close(panel: pd.DataFrame, raw: Path) -> pd.DataFrame:
     ).sort_values(["date_us", "bar_start_utc"]).reset_index(drop=True)
 
 
-def _attach_news(panel: pd.DataFrame, raw: Path) -> pd.DataFrame:
+def _attach_news(panel: pd.DataFrame, raw: Path, config: H2Config) -> pd.DataFrame:
     news = _parquet_tree(raw / "us" / "news" / "SKHY_sentiment_5min").copy()
-    news["bar_start_utc"] = _utc(news["timestamp"])
-    news = news[["bar_start_utc", "sentiment_sum", "article_count"]].rename(
+    news["bar_start_utc"] = _utc(news["timestamp"]).dt.floor(
+        f"{config.interval_minutes}min"
+    )
+    news = news.groupby("bar_start_utc", as_index=False)[
+        ["sentiment_sum", "article_count"]
+    ].sum().rename(
         columns={"sentiment_sum": "news_flow", "article_count": "news_count"}
     )
     output = panel.merge(news, on="bar_start_utc", how="left")
@@ -314,7 +334,7 @@ def build_intraday_panel(
     daily: pd.DataFrame | None = None,
     config: H2Config = H2Config(),
 ) -> pd.DataFrame:
-    """Build the point-in-time five-minute H2 panel and both equilibrium gaps."""
+    """Build the point-in-time thirty-minute H2 panel and both equilibrium gaps."""
     config.validate()
     daily = (
         pd.read_parquet(H2_FEATURE_PATH)
@@ -324,7 +344,7 @@ def build_intraday_panel(
     if daily is None:
         raise FileNotFoundError(f"Daily H1 panel not found: {H2_FEATURE_PATH}")
 
-    skhy = _five_minute_bars(raw, "SKHY")
+    skhy = _interval_bars(raw, "SKHY", config)
     minute = _local_minutes(skhy["bar_start_utc"])
     start_minute = int(config.start_clock[:2]) * 60 + int(config.start_clock[3:])
     close_minute = int(config.regular_close[:2]) * 60 + int(config.regular_close[3:])
@@ -341,11 +361,11 @@ def build_intraday_panel(
     panel["log_dollar_volume"] = np.log1p(panel["dollar_volume"])
 
     for ticker in ("SOXX", "QQQ"):
-        panel = panel.merge(_five_minute_bars(raw, ticker), on="bar_start_utc", how="left")
+        panel = panel.merge(_interval_bars(raw, ticker, config), on="bar_start_utc", how="left")
         panel = _market_returns(panel, ticker)
     panel = _attach_fx(panel, raw, config)
     panel = _attach_korean_close(panel, raw)
-    panel = _attach_news(panel, raw)
+    panel = _attach_news(panel, raw, config)
 
     h1 = _h1_parameters_by_date(panel, daily, config)
     panel = panel.merge(h1, on="date_us", how="left")
@@ -409,13 +429,13 @@ def _anchor_filter(frame: pd.DataFrame, anchor: AnchorName) -> pd.Series:
     raise ValueError("anchor must be 'fixed' or 'liquid'")
 
 
-def _speed(lambda_5: float) -> tuple[float, float]:
-    if not -1.0 < lambda_5 < 0.0:
+def _speed(lambda_30: float) -> tuple[float, float]:
+    if not -1.0 < lambda_30 < 0.0:
         return math.nan, math.nan
-    remaining = 1.0 + lambda_5
+    remaining = 1.0 + lambda_30
     return (
-        5.0 * math.log(0.5) / math.log(remaining),
-        5.0 * math.log(0.1) / math.log(remaining),
+        30.0 * math.log(0.5) / math.log(remaining),
+        30.0 * math.log(0.1) / math.log(remaining),
     )
 
 
@@ -426,9 +446,9 @@ def fit_intraday_ecm(
     anchor: AnchorName = "fixed",
     session: SessionName = "regular",
     controls: Iterable[str] = ECM_CONTROLS,
-    hac_lags: int = 6,
+    hac_lags: int = 2,
 ) -> tuple[dict[str, float | int | str | bool], object]:
-    """Estimate Delta g[t+1] on g[t] and point-in-time five-minute controls."""
+    """Estimate Delta g[t+1] on g[t] and point-in-time thirty-minute controls."""
     deviation = _deviation_column(reference)
     control_names = tuple(dict.fromkeys(controls))
     missing = set(control_names).difference(panel.columns)
@@ -442,21 +462,21 @@ def fit_intraday_ecm(
     frame["delta_g_next"] = frame["next_g"] - frame[deviation]
     consecutive = (
         frame["next_ts"] - frame["observation_ts_utc"]
-    ).eq(pd.Timedelta(minutes=5))
+    ).eq(pd.Timedelta(minutes=30))
     required = ["delta_g_next", deviation, *control_names]
     sample = frame.loc[consecutive].replace([np.inf, -np.inf], np.nan).dropna(
         subset=required
     )
     if len(sample) <= len(control_names) + 3:
-        raise ValueError("Insufficient complete five-minute observations for H2 ECM")
+        raise ValueError("Insufficient complete thirty-minute observations for H2 ECM")
     x = add_constant(
         sample[[deviation, *control_names]].astype(float), has_constant="add"
     )
     fit = OLS(sample["delta_g_next"].astype(float), x).fit(
         cov_type="HAC", cov_kwds={"maxlags": hac_lags}
     )
-    lambda_5 = float(fit.params[deviation])
-    half_life, t90 = _speed(lambda_5)
+    lambda_30 = float(fit.params[deviation])
+    half_life, t90 = _speed(lambda_30)
     summary: dict[str, float | int | str | bool] = {
         "reference": reference,
         "anchor": anchor,
@@ -464,10 +484,10 @@ def fit_intraday_ecm(
         "nobs": int(fit.nobs),
         "sessions": int(sample["date_us"].nunique()),
         "controls": ", ".join(control_names),
-        "lambda_5": lambda_5,
-        "lambda_5_std_error": float(fit.bse[deviation]),
-        "lambda_5_p_value": float(fit.pvalues[deviation]),
-        "monotonic_stable": bool(-1.0 < lambda_5 < 0.0),
+        "lambda_30": lambda_30,
+        "lambda_30_std_error": float(fit.bse[deviation]),
+        "lambda_30_p_value": float(fit.pvalues[deviation]),
+        "monotonic_stable": bool(-1.0 < lambda_30 < 0.0),
         "half_life_minutes": half_life,
         "t90_minutes": t90,
         "r_squared": float(fit.rsquared),
@@ -486,7 +506,7 @@ def fit_threshold_ecm(
     anchor: AnchorName = "fixed",
     session: SessionName = "regular",
     controls: Iterable[str] = ECM_CONTROLS,
-    hac_lags: int = 6,
+    hac_lags: int = 2,
 ) -> dict[str, float | int | str | bool]:
     """Estimate separate adjustment rates inside and outside the convergence band."""
     deviation = _deviation_column(reference)
@@ -505,7 +525,7 @@ def fit_threshold_ecm(
     )
     consecutive = (
         frame["next_ts"] - frame["observation_ts_utc"]
-    ).eq(pd.Timedelta(minutes=5))
+    ).eq(pd.Timedelta(minutes=30))
     required = ["delta_g_next", "g_large", "g_small", *control_names]
     sample = frame.loc[consecutive].replace([np.inf, -np.inf], np.nan).dropna(
         subset=required
@@ -573,7 +593,7 @@ def convergence_episodes(
             previous = None
             for index, is_inside in enumerate(inside):
                 current = pd.Timestamp(times[index])
-                consecutive = previous is not None and current - previous == pd.Timedelta(minutes=5)
+                consecutive = previous is not None and current - previous == pd.Timedelta(minutes=30)
                 run = run + 1 if is_inside and (run == 0 or consecutive) else int(is_inside)
                 if run >= confirmation_bars:
                     event_time = current
@@ -653,7 +673,7 @@ def convergence_summary(
         median = curve.loc[curve["convergence_probability"].ge(0.5), "time_minutes"]
         if not median.empty:
             summary["median_convergence_minutes"] = float(median.iloc[0])
-        for horizon in (15, 30, 60):
+        for horizon in (30, 60, 120):
             prior = curve.loc[curve["time_minutes"].le(horizon)]
             summary[f"probability_by_{horizon}_minutes"] = (
                 float(prior["convergence_probability"].iloc[-1]) if not prior.empty else 0.0
@@ -672,8 +692,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-h1-train", type=int, default=40)
     parser.add_argument("--min-dynamic-days", type=int, default=20)
     parser.add_argument("--min-dynamic-observations", type=int, default=200)
-    parser.add_argument("--min-dollar-volume", type=float, default=25_000.0)
-    parser.add_argument("--min-quote-updates", type=int, default=5)
+    parser.add_argument("--min-dollar-volume", type=float, default=150_000.0)
+    parser.add_argument("--min-quote-updates", type=int, default=30)
     parser.add_argument("--max-spread-bps", type=float, default=75.0)
     parser.add_argument("--convergence-band-bps", type=float, default=25.0)
     parser.add_argument("--transaction-cost-bps", type=float, default=8.0)
@@ -754,7 +774,7 @@ def main() -> int:
     pd.DataFrame(survival_rows).to_parquet(
         output / "h2_convergence_summary.parquet", index=False
     )
-    print(f"[H2] Wrote {len(panel):,} five-minute rows to {output}", flush=True)
+    print(f"[H2] Wrote {len(panel):,} thirty-minute rows to {output}", flush=True)
     return 0
 
 

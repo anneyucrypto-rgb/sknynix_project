@@ -77,7 +77,7 @@ def model_conclusions(data: dict[str, pd.DataFrame | Path]) -> dict[str, dict[st
         stable = bool(row["monotonic_stable"])
         output["h2"] = {
             "status": "Convergent" if stable else "No convergence detected",
-            "detail": f"Five-minute λ = {float(row['lambda_5']):.4f}; p = {float(row['lambda_5_p_value']):.3f}.",
+            "detail": f"Thirty-minute λ = {float(row['lambda_30']):.4f}; p = {float(row['lambda_30_p_value']):.3f}.",
         }
     if isinstance(h3, pd.DataFrame) and not h3.empty:
         row = h3.iloc[0]

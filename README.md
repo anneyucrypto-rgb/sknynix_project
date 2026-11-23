@@ -57,7 +57,7 @@ workflow. Every other Python module is described below.
 | [`src/features/chronos_2.py`](src/features/chronos_2.py) | Selects the Chronos-2 target and four daily covariates from the H1/H2 panel and writes the dedicated Chronos experiment input. |
 | [`src/features/utils.py`](src/features/utils.py) | Provides shared Parquet readers, timestamp normalization, validation, atomic feature writes, and legacy execution-feature calculations. |
 | [`src/hypotheses/h1.py`](src/hypotheses/h1.py) | Estimates the daily ARDL--UECM, performs bounds and bootstrap inference, constructs the ECT, and evaluates rolling stability. |
-| [`src/hypotheses/h2.py`](src/hypotheses/h2.py) | Measures five-minute convergence toward static and dynamic H1 equilibrium references from 09:30 ET using fixed and liquidity-qualified clocks, ECMs, threshold ECMs, and censored event-time inference. |
+| [`src/hypotheses/h2.py`](src/hypotheses/h2.py) | Measures 30-minute convergence toward static and dynamic H1 equilibrium references from 09:30 ET using fixed and liquidity-qualified clocks, ECMs, threshold ECMs, and censored event-time inference. |
 | [`src/hypotheses/h3.py`](src/hypotheses/h3.py) | Tests whether the next Korean session responds to the equilibrium error remaining at the U.S. close, using causal H1 parameters and HAC inference. |
 | [`src/hypotheses/overnight_ablation.py`](src/hypotheses/overnight_ablation.py) | Runs the separate legacy daily overnight-return control-ablation forecast and writes model/audit artifacts. |
 | [`backtest/backtest.py`](backtest/backtest.py) | Reproduces the retained H1/H2 expanding-window forecasts from a materialized ablation run. |
@@ -103,7 +103,7 @@ latest FX-adjusted Korean ordinary-share close using a daily ARDL--UECM. It
 derives the equilibrium slope from `-rho_k/rho_a`, tests the level terms with
 ARDL bounds and bootstrap inference, and reports rolling stability. The full
 specification is in [`design/h1.md`](design/h1.md). The canonical H2 study then
-measures five-minute convergence from 09:30 using fixed and liquidity-qualified
+measures 30-minute convergence from 09:30 using fixed and liquidity-qualified
 clocks; its full specification and current results are in
 [`design/h2.md`](design/h2.md).
 

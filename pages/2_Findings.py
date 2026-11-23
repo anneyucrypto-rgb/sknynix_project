@@ -116,14 +116,14 @@ def _price_figure(frame: pd.DataFrame):
 
 
 def _h2_response_figure(models: pd.DataFrame):
-    horizon = np.arange(5, 125, 5)
+    horizon = np.arange(30, 391, 30)
     figure, axis = plt.subplots(figsize=(11, 4.5))
     figure.patch.set_facecolor(COLORS["paper"])
     choices = models.loc[models["anchor"].eq("liquid")].drop_duplicates("reference")
     for _, row in choices.iterrows():
-        coefficient = float(row["lambda_5"])
-        std_error = float(row["lambda_5_std_error"])
-        bars = horizon / 5
+        coefficient = float(row["lambda_30"])
+        std_error = float(row["lambda_30_std_error"])
+        bars = horizon / 30
         response = (1 + coefficient) ** bars
         lower = (1 + coefficient - 1.96 * std_error) ** bars
         upper = (1 + coefficient + 1.96 * std_error) ** bars
@@ -142,9 +142,9 @@ def _h2_response_figure(models: pd.DataFrame):
 def _direction_figure(h2: pd.DataFrame, h3: pd.DataFrame):
     dynamic = h2.loc[h2["reference"].eq("dynamic") & h2["anchor"].eq("liquid")].iloc[0]
     korean = h3.iloc[0]
-    estimates = np.array([float(dynamic["lambda_5"]), float(korean["lambda_k"])])
-    errors = np.array([float(dynamic["lambda_5_std_error"]), float(korean["lambda_k_std_error"])]) * 1.96
-    labels = ["Korean reference → SKHY\nH2, 5-minute", "SKHY → Korean share\nH3, next session"]
+    estimates = np.array([float(dynamic["lambda_30"]), float(korean["lambda_k"])])
+    errors = np.array([float(dynamic["lambda_30_std_error"]), float(korean["lambda_k_std_error"])]) * 1.96
+    labels = ["Korean reference → SKHY\nH2, 30-minute", "SKHY → Korean share\nH3, next session"]
     figure, axis = plt.subplots(figsize=(9, 4.1))
     figure.patch.set_facecolor(COLORS["paper"])
     axis.axhline(0, color=COLORS["ink"], linewidth=.8)
@@ -192,7 +192,7 @@ if isinstance(data["h3_panel"], pd.DataFrame) and not data["h3_panel"].empty:
     st.pyplot(_price_figure(data["h3_panel"]), clear_figure=True, width="stretch")
 
 st.header("H2 — Error correction and time to convergence")
-st.markdown('<div class="section-note">The five-minute ECM begins at 09:30 ET. Values below one in the response chart imply a shrinking gap; confidence bands incorporate uncertainty in the estimated adjustment coefficient.</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-note">The 30-minute ECM begins at 09:30 ET. Values below one in the response chart imply a shrinking gap; confidence bands incorporate uncertainty in the estimated adjustment coefficient.</div>', unsafe_allow_html=True)
 h2_models = data["h2_models"]
 if isinstance(h2_models, pd.DataFrame) and not h2_models.empty:
     preferred = h2_models.loc[h2_models["reference"].eq("dynamic") & h2_models["anchor"].eq("liquid")].iloc[0]
@@ -200,12 +200,12 @@ if isinstance(h2_models, pd.DataFrame) and not h2_models.empty:
     event = convergence.loc[convergence["reference"].eq("dynamic") & convergence["anchor"].eq("liquid") & convergence["duration"].eq("duration_clock_minutes")]
     event_probability = 1 - float(event.iloc[0]["no_convergence_rate"]) if not event.empty else math.nan
     metrics = st.columns(4)
-    metrics[0].metric("Five-minute λ", f"{float(preferred['lambda_5']):.4f}")
+    metrics[0].metric("Thirty-minute λ", f"{float(preferred['lambda_30']):.4f}")
     metrics[1].metric("Half-life", "Undefined" if pd.isna(preferred["half_life_minutes"]) else f"{float(preferred['half_life_minutes']):.1f} min")
     metrics[2].metric("90% convergence", "Undefined" if pd.isna(preferred["t90_minutes"]) else f"{float(preferred['t90_minutes']):.1f} min")
     metrics[3].metric("Observed by close", f"{100 * event_probability:.1f}%")
     st.pyplot(_h2_response_figure(h2_models), clear_figure=True, width="stretch")
-    st.caption("Implied response paths are model-based, not realized intraday averages. The current λ estimates are positive and insignificant, so no finite convergence half-life is reported.")
+    st.caption("Implied response paths are model-based, not realized intraday averages. The dynamic-reference coefficient is negative and significant, but its half-life extends well beyond one U.S. regular session.")
 else:
     st.info("H2 has not been estimated for this run.")
 
@@ -220,7 +220,7 @@ if isinstance(h3_model, pd.DataFrame) and not h3_model.empty:
     metrics[2].metric("Target sessions", f"{int(h3['target_sessions'])}")
     metrics[3].metric("Adjusted R²", f"{float(h3['adjusted_r_squared']):.3f}")
     st.pyplot(_direction_figure(h2_models, h3_model), clear_figure=True, width="stretch")
-    st.caption("The two coefficients have different horizons and sign conventions: H2 convergence requires λ < 0; H3 Korean adjustment requires λK > 0.")
+    st.caption("The two coefficients have different horizons and sign conventions: H2 30-minute convergence requires λ < 0; H3 Korean adjustment requires λK > 0.")
 else:
     st.info("H3 has not been estimated for this run.")
 
@@ -238,7 +238,7 @@ else:
 
 st.header("Integrated conclusion and Markdown reports")
 st.markdown(
-    """<div class="conclusion"><b>Integrated finding.</b> H1 identifies a statistically supported daily cross-market equilibrium. H2 does not detect monotonic five-minute correction by SKHY after 09:30 ET, and therefore yields no finite half-life. H3 finds a positive next-Korean-session response: a 1% larger U.S.-close discrepancy is associated with an approximately 0.502% higher Korean return. Together, the current evidence places more of the observed completion mechanism in the following Korean session than in intraday SKHY adjustment.</div>""",
+    """<div class="conclusion"><b>Integrated finding.</b> H1 identifies a statistically supported daily cross-market equilibrium. H2 detects significant but slow 30-minute correction toward the dynamic equilibrium: the estimated half-life is about 1,056 minutes, and only 9.7% of eligible sessions enter the band before the U.S. close. H3 also finds a positive next-Korean-session response: a 1% larger U.S.-close discrepancy is associated with an approximately 0.502% higher Korean return. Together, the evidence indicates that adjustment begins during U.S. trading but is rarely completed there, with the following Korean session providing an additional convergence channel.</div>""",
     unsafe_allow_html=True,
 )
 

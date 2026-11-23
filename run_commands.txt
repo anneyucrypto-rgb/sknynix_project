@@ -19,7 +19,7 @@ python -m src.features.h1_h2
 # Estimate H1 directly, including bounds inference and rolling stability.
 python -m src.hypotheses.h1 --max-p 3 --max-q 3 --rolling-window 60 --bootstrap-replications 499
 
-# Estimate H2 five-minute convergence from 09:30 ET using fixed and
+# Estimate H2 thirty-minute convergence from 09:30 ET using fixed and
 # liquidity-qualified clocks, static/dynamic references, and survival inference.
 python -m src.hypotheses.h2
 
